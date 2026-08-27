@@ -1,20 +1,17 @@
 {
-  "name": "secret-messenger",
+  "name": "doodoodoodedadada",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "deno": "deno run --allow-net --allow-env --allow-read --allow-write server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@libsql/client": "^0.17.4",
-    "bcrypt": "^6.0.0",
-    "express": "^5.2.1",
-    "express-session": "^1.19.0",
-    "multer": "^1.4.5-lts.1",
-    "socket.io": "^4.8.3"
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2"
   }
 }
