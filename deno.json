@@ -1,0 +1,14 @@
+{
+  "tasks": {
+    "start": "deno run --allow-net --allow-read --allow-env --allow-write server.js",
+    "dev": "deno run --watch --allow-net --allow-read --allow-env --allow-write server.js"
+  },
+  "imports": {
+    "express": "npm:express@^4.19.2",
+    "express-session": "npm:express-session@^1.18.0",
+    "sqlite3": "npm:sqlite3@^5.1.7",
+    "bcryptjs": "npm:bcryptjs@^2.4.3",
+    "path": "node:path",
+    "fs": "node:fs"
+  }
+}
