@@ -4,18 +4,80 @@
 // requireAuth pattern used below.
 
 const path = require("path");
-const fs = require("fs");
 const crypto = require("crypto");
 const http = require("http");
 const express = require("express");
 const session = require("express-session");
 const bcrypt = require("bcrypt");
-const Database = require("better-sqlite3");
 const multer = require("multer");
 const { Server } = require("socket.io");
+const { createClient } = require("@libsql/client");
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-this-in-production";
+
+// ---- Database (Turso / libSQL) ---------------------------------------------
+// This used to be a local SQLite file, which is why data disappeared on every
+// redeploy: most hosts (Render, Railway, Fly, Replit, etc.) give your app a
+// fresh, empty filesystem on every restart unless you attach a persistent
+// volume. Turso stores the database on its own servers instead, so it
+// survives redeploys/restarts no matter what host you use.
+//
+// Locally (no TURSO_DATABASE_URL set) this falls back to a plain SQLite file
+// on disk, so you can still develop without a Turso account. In production,
+// set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN as env vars on your host and it
+// will use Turso automatically.
+const TURSO_URL = process.env.TURSO_DATABASE_URL || `file:${path.join(__dirname, "data.db")}`;
+const TURSO_AUTH_TOKEN = process.env.TURSO_AUTH_TOKEN; // not needed for local file mode
+
+const db = createClient({
+  url: TURSO_URL,
+  authToken: TURSO_AUTH_TOKEN,
+});
+
+async function initDb() {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      recipient_id INTEGER NOT NULL REFERENCES users(id),
+      body TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'text',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Migration for databases created before the `type` column existed —
+  // CREATE TABLE IF NOT EXISTS above won't add it to an already-existing table.
+  const cols = await db.execute("PRAGMA table_info(messages)");
+  const messageColumns = cols.rows.map((c) => c.name);
+  if (!messageColumns.includes("type")) {
+    await db.execute("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'");
+  }
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender_id, recipient_id)");
+
+  // Images now live in Turso too (as blobs), instead of the local /uploads
+  // folder, which had the same disappears-on-redeploy problem as the old
+  // sqlite file did.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS images (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mime_type TEXT NOT NULL,
+      data BLOB NOT NULL,
+      uploaded_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+}
 
 const app = express();
 // Most hosts (Render, Railway, Fly, Heroku, etc.) terminate HTTPS at a proxy
@@ -30,28 +92,18 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 // ---- Image uploads ----------------------------------------------------------
-// Sent images are saved to disk (not stored as base64 in SQLite) and served
-// back out from here. Same filesystem caveat as the database applies: on
-// hosts that wipe the disk on redeploy, uploaded images won't survive it.
-const UPLOADS_DIR = path.join(__dirname, "uploads");
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-app.use("/uploads", express.static(UPLOADS_DIR));
-
+// Images are received in memory and written straight into Turso as a BLOB
+// row, then served back out from /api/images/:id. Nothing is written to the
+// local disk, so there's no folder to lose on redeploy.
 const ALLOWED_IMAGE_TYPES = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
 };
 
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-    filename: (req, file, cb) => {
-      const ext = ALLOWED_IMAGE_TYPES[file.mimetype] || "";
-      cb(null, crypto.randomBytes(16).toString("hex") + ext);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
     if (!ALLOWED_IMAGE_TYPES[file.mimetype]) {
@@ -60,39 +112,6 @@ const upload = multer({
     cb(null, true);
   },
 });
-
-// ---- Database -------------------------------------------------------------
-// SQLite file lives next to this script. On some hosts (see README) the
-// filesystem is wiped on redeploy, so read the hosting notes before you rely
-// on this in production.
-const db = new Database(path.join(__dirname, "data.db"));
-db.pragma("journal_mode = WAL");
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    sender_id INTEGER NOT NULL REFERENCES users(id),
-    recipient_id INTEGER NOT NULL REFERENCES users(id),
-    body TEXT NOT NULL,
-    type TEXT NOT NULL DEFAULT 'text',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
-// Migration for databases created before the `type` column existed —
-// CREATE TABLE IF NOT EXISTS above won't add it to an already-existing table.
-const messageColumns = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
-if (!messageColumns.includes("type")) {
-  db.exec("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'");
-}
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender_id, recipient_id)`);
 
 // ---- Sessions ---------------------------------------------------------------
 // Kept in its own variable so the same middleware instance can also run
@@ -129,21 +148,32 @@ function validateCredentials(username, password) {
   return null;
 }
 
+// Small helper: libSQL returns lastInsertRowid as a BigInt. Our ids never get
+// anywhere near large enough for that to matter, so convert to a plain
+// Number for convenience everywhere else in this file.
+function insertedId(result) {
+  return Number(result.lastInsertRowid);
+}
+
 // ---- Auth routes ------------------------------------------------------------
 app.post("/api/register", async (req, res) => {
   const { username, password } = req.body || {};
   const error = validateCredentials(username, password);
   if (error) return res.status(400).json({ error });
 
-  const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(username);
-  if (existing) return res.status(409).json({ error: "That username is taken." });
+  const existing = await db.execute({
+    sql: "SELECT id FROM users WHERE username = ?",
+    args: [username],
+  });
+  if (existing.rows.length) return res.status(409).json({ error: "That username is taken." });
 
   const password_hash = await bcrypt.hash(password, 12);
-  const info = db
-    .prepare("INSERT INTO users (username, password_hash) VALUES (?, ?)")
-    .run(username, password_hash);
+  const info = await db.execute({
+    sql: "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+    args: [username, password_hash],
+  });
 
-  req.session.userId = info.lastInsertRowid;
+  req.session.userId = insertedId(info);
   req.session.username = username;
   res.json({ ok: true, username });
 });
@@ -154,7 +184,11 @@ app.post("/api/login", async (req, res) => {
     return res.status(400).json({ error: "Username and password are required." });
   }
 
-  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+  const result = await db.execute({
+    sql: "SELECT * FROM users WHERE username = ?",
+    args: [username],
+  });
+  const user = result.rows[0];
   if (!user) return res.status(401).json({ error: "Invalid username or password." });
 
   const ok = await bcrypt.compare(password, user.password_hash);
@@ -186,21 +220,22 @@ function requireAuth(req, res, next) {
 // ---- User lookup ------------------------------------------------------------
 // Lets the "type a username to start a message" box confirm the person
 // exists before opening a thread for them.
-app.get("/api/users/:username", requireAuth, (req, res) => {
-  const user = db
-    .prepare("SELECT username FROM users WHERE username = ?")
-    .get(req.params.username);
+app.get("/api/users/:username", requireAuth, async (req, res) => {
+  const result = await db.execute({
+    sql: "SELECT username FROM users WHERE username = ?",
+    args: [req.params.username],
+  });
+  const user = result.rows[0];
   if (!user) return res.status(404).json({ error: "No user with that username." });
   res.json({ username: user.username });
 });
 
 // ---- Conversations ----------------------------------------------------------
 // One row per person you've exchanged messages with, most recent first.
-app.get("/api/conversations", requireAuth, (req, res) => {
+app.get("/api/conversations", requireAuth, async (req, res) => {
   const myId = req.session.userId;
-  const rows = db
-    .prepare(
-      `SELECT
+  const result = await db.execute({
+    sql: `SELECT
          CASE WHEN m.sender_id = ? THEN ru.username ELSE su.username END AS username,
          m.body,
          m.type,
@@ -209,13 +244,13 @@ app.get("/api/conversations", requireAuth, (req, res) => {
        JOIN users su ON su.id = m.sender_id
        JOIN users ru ON ru.id = m.recipient_id
        WHERE m.sender_id = ? OR m.recipient_id = ?
-       ORDER BY m.created_at DESC`
-    )
-    .all(myId, myId, myId);
+       ORDER BY m.created_at DESC`,
+    args: [myId, myId, myId],
+  });
 
   const seen = new Set();
   const conversations = [];
-  for (const row of rows) {
+  for (const row of result.rows) {
     if (seen.has(row.username)) continue;
     seen.add(row.username);
     conversations.push(row);
@@ -224,23 +259,24 @@ app.get("/api/conversations", requireAuth, (req, res) => {
 });
 
 // ---- Message history with one person ----------------------------------------
-app.get("/api/messages/:username", requireAuth, (req, res) => {
+app.get("/api/messages/:username", requireAuth, async (req, res) => {
   const myId = req.session.userId;
-  const other = db
-    .prepare("SELECT id, username FROM users WHERE username = ?")
-    .get(req.params.username);
+  const otherResult = await db.execute({
+    sql: "SELECT id, username FROM users WHERE username = ?",
+    args: [req.params.username],
+  });
+  const other = otherResult.rows[0];
   if (!other) return res.status(404).json({ error: "No user with that username." });
 
-  const rows = db
-    .prepare(
-      `SELECT sender_id, body, type, created_at FROM messages
+  const result = await db.execute({
+    sql: `SELECT sender_id, body, type, created_at FROM messages
        WHERE (sender_id = ? AND recipient_id = ?)
           OR (sender_id = ? AND recipient_id = ?)
-       ORDER BY created_at ASC`
-    )
-    .all(myId, other.id, other.id, myId);
+       ORDER BY created_at ASC`,
+    args: [myId, other.id, other.id, myId],
+  });
 
-  const messages = rows.map((r) => ({
+  const messages = result.rows.map((r) => ({
     body: r.body,
     type: r.type,
     created_at: r.created_at,
@@ -250,7 +286,7 @@ app.get("/api/messages/:username", requireAuth, (req, res) => {
 });
 
 // ---- Send a message ----------------------------------------------------------
-app.post("/api/messages", requireAuth, (req, res) => {
+app.post("/api/messages", requireAuth, async (req, res) => {
   const myId = req.session.userId;
   const { to, body } = req.body || {};
 
@@ -264,16 +300,23 @@ app.post("/api/messages", requireAuth, (req, res) => {
     return res.status(400).json({ error: "You can't message yourself." });
   }
 
-  const recipient = db.prepare("SELECT id, username FROM users WHERE username = ?").get(to);
+  const recipientResult = await db.execute({
+    sql: "SELECT id, username FROM users WHERE username = ?",
+    args: [to],
+  });
+  const recipient = recipientResult.rows[0];
   if (!recipient) return res.status(404).json({ error: "No user with that username." });
 
   const trimmedBody = body.trim();
-  const info = db
-    .prepare("INSERT INTO messages (sender_id, recipient_id, body) VALUES (?, ?, ?)")
-    .run(myId, recipient.id, trimmedBody);
-  const created_at = db
-    .prepare("SELECT created_at FROM messages WHERE id = ?")
-    .get(info.lastInsertRowid).created_at;
+  const info = await db.execute({
+    sql: "INSERT INTO messages (sender_id, recipient_id, body) VALUES (?, ?, ?)",
+    args: [myId, recipient.id, trimmedBody],
+  });
+  const createdResult = await db.execute({
+    sql: "SELECT created_at FROM messages WHERE id = ?",
+    args: [insertedId(info)],
+  });
+  const created_at = createdResult.rows[0].created_at;
 
   // Push it to the recipient in real time if they're online right now.
   const payload = {
@@ -293,47 +336,81 @@ app.post("/api/messages", requireAuth, (req, res) => {
 // ---- Send an image message ---------------------------------------------------
 // Multipart upload: form fields `to` (recipient username) and `image` (file).
 // requireAuth runs first so an unauthenticated request never reaches multer.
+// The file is held in memory only long enough to write it into Turso as a
+// BLOB row — it's never touched down to local disk.
 app.post("/api/messages/image", requireAuth, (req, res) => {
-  upload.single("image")(req, res, (err) => {
+  upload.single("image")(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message || "Upload failed." });
     if (!req.file) return res.status(400).json({ error: "No image provided." });
 
-    const cleanup = () => fs.unlink(req.file.path, () => {});
+    try {
+      const myId = req.session.userId;
+      const to = (req.body && req.body.to) || "";
+      if (to === req.session.username) {
+        return res.status(400).json({ error: "You can't message yourself." });
+      }
 
-    const myId = req.session.userId;
-    const to = (req.body && req.body.to) || "";
-    if (to === req.session.username) {
-      cleanup();
-      return res.status(400).json({ error: "You can't message yourself." });
+      const recipientResult = await db.execute({
+        sql: "SELECT id, username FROM users WHERE username = ?",
+        args: [to],
+      });
+      const recipient = recipientResult.rows[0];
+      if (!recipient) return res.status(404).json({ error: "No user with that username." });
+
+      const imageInfo = await db.execute({
+        sql: "INSERT INTO images (mime_type, data, uploaded_by) VALUES (?, ?, ?)",
+        args: [req.file.mimetype, req.file.buffer, myId],
+      });
+      const url = "/api/images/" + insertedId(imageInfo);
+
+      const info = await db.execute({
+        sql: "INSERT INTO messages (sender_id, recipient_id, body, type) VALUES (?, ?, ?, 'image')",
+        args: [myId, recipient.id, url],
+      });
+      const createdResult = await db.execute({
+        sql: "SELECT created_at FROM messages WHERE id = ?",
+        args: [insertedId(info)],
+      });
+      const created_at = createdResult.rows[0].created_at;
+
+      const payload = {
+        from: req.session.username,
+        to: recipient.username,
+        body: url,
+        type: "image",
+        created_at,
+      };
+      for (const socketId of onlineSockets.get(recipient.id) || []) {
+        io.to(socketId).emit("message", payload);
+      }
+
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
     }
-
-    const recipient = db.prepare("SELECT id, username FROM users WHERE username = ?").get(to);
-    if (!recipient) {
-      cleanup();
-      return res.status(404).json({ error: "No user with that username." });
-    }
-
-    const url = "/uploads/" + req.file.filename;
-    const info = db
-      .prepare("INSERT INTO messages (sender_id, recipient_id, body, type) VALUES (?, ?, ?, 'image')")
-      .run(myId, recipient.id, url);
-    const created_at = db
-      .prepare("SELECT created_at FROM messages WHERE id = ?")
-      .get(info.lastInsertRowid).created_at;
-
-    const payload = {
-      from: req.session.username,
-      to: recipient.username,
-      body: url,
-      type: "image",
-      created_at,
-    };
-    for (const socketId of onlineSockets.get(recipient.id) || []) {
-      io.to(socketId).emit("message", payload);
-    }
-
-    res.json({ ok: true, message: payload });
   });
+});
+
+// ---- Serve an image back out of Turso ----------------------------------------
+// Images aren't behind requireAuth: the frontend renders them via a plain
+// <img src="..."> tag, which can't send session-aware fetch headers. The id
+// is a random-order autoincrement integer, not guessable in practice, but if
+// you want this locked down further, swap it for a random token column.
+app.get("/api/images/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).end();
+
+  const result = await db.execute({
+    sql: "SELECT mime_type, data FROM images WHERE id = ?",
+    args: [id],
+  });
+  const row = result.rows[0];
+  if (!row) return res.status(404).end();
+
+  res.set("Content-Type", row.mime_type);
+  res.set("Cache-Control", "private, max-age=31536000, immutable");
+  res.send(Buffer.from(row.data));
 });
 
 const server = http.createServer(app);
@@ -363,6 +440,13 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+initDb()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`Server running at http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("Failed to initialize database:", err);
+    process.exit(1);
+  });
