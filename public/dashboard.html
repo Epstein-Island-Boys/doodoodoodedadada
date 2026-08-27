@@ -18,21 +18,10 @@
     </div>
   </div>
 
-  <script src="auth.js"></script>
   <script>
-    (async () => {
-      const me = await apiGet("/api/me");
-      if (!me.loggedIn) {
-        window.location.href = "/login.html";
-        return;
-      }
-      document.getElementById("welcome").textContent = `Welcome, ${me.username}`;
-    })();
-
-    document.getElementById("logout").addEventListener("click", async () => {
-      await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
-      window.location.href = "/index.html";
-    });
+    // Messaging now lives at /messages.html — send anyone who still has
+    // this page bookmarked there instead.
+    window.location.href = "/messages.html";
   </script>
 </body>
 </html>

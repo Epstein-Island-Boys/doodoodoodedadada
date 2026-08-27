@@ -20,8 +20,19 @@ register). Click "Hide this again" to reset it.
   JavaScript can't read or forge it, and it's what any future
   `requireAuth`-protected route (messages, calls, posts) will check.
 
+## Messaging
+After logging in you land on `/messages.html`. Type a username in the
+"Message a username…" box and hit Start to open a thread with them (you'll
+get an error if that username doesn't exist). Type in the composer at the
+bottom and hit Send. If the other person is online, the message shows up
+in their chat instantly over a websocket — no refresh needed. If they're
+offline, it's still saved and waiting for them the next time they open
+that conversation.
+
 ## Files
-- server.js — Express app, SQLite user table, session-based auth API
+- server.js — Express app, SQLite tables (users + messages), session-based
+  auth API, and the Socket.io wiring for live delivery
 - public/index.html + style.css + reveal.js — the decoy + secret toggle
-- public/login.html, register.html, dashboard.html — auth pages
+- public/login.html, register.html — auth pages
+- public/messages.html + messages.js — the messaging GUI
 - public/auth.js — shared fetch helpers

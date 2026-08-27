@@ -4,10 +4,12 @@
 // requireAuth pattern used below.
 
 const path = require("path");
+const http = require("http");
 const express = require("express");
 const session = require("express-session");
 const bcrypt = require("bcrypt");
 const Database = require("better-sqlite3");
+const { Server } = require("socket.io");
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-this-in-production";
@@ -31,22 +33,35 @@ db.exec(`
   )
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id INTEGER NOT NULL REFERENCES users(id),
+    recipient_id INTEGER NOT NULL REFERENCES users(id),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender_id, recipient_id)`);
+
 // ---- Sessions ---------------------------------------------------------------
-app.use(
-  session({
-    name: "sid",
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      httpOnly: true,
-      sameSite: "lax",
-      // secure:true requires HTTPS — turn on once you deploy behind TLS.
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
-    },
-  })
-);
+// Kept in its own variable so the same middleware instance can also run
+// on socket.io connections below — that's what lets a socket see who's
+// logged in without a separate login step.
+const sessionMiddleware = session({
+  name: "sid",
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: "lax",
+    // secure:true requires HTTPS — turn on once you deploy behind TLS.
+    secure: process.env.NODE_ENV === "production",
+    maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
+  },
+});
+app.use(sessionMiddleware);
 
 // ---- Validation helpers -----------------------------------------------------
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
@@ -118,9 +133,137 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// Example of how future features get bolted on:
-// app.get("/api/messages", requireAuth, (req, res) => { ... });
+// ---- User lookup ------------------------------------------------------------
+// Lets the "type a username to start a message" box confirm the person
+// exists before opening a thread for them.
+app.get("/api/users/:username", requireAuth, (req, res) => {
+  const user = db
+    .prepare("SELECT username FROM users WHERE username = ?")
+    .get(req.params.username);
+  if (!user) return res.status(404).json({ error: "No user with that username." });
+  res.json({ username: user.username });
+});
 
-app.listen(PORT, () => {
+// ---- Conversations ----------------------------------------------------------
+// One row per person you've exchanged messages with, most recent first.
+app.get("/api/conversations", requireAuth, (req, res) => {
+  const myId = req.session.userId;
+  const rows = db
+    .prepare(
+      `SELECT
+         CASE WHEN m.sender_id = ? THEN ru.username ELSE su.username END AS username,
+         m.body,
+         m.created_at
+       FROM messages m
+       JOIN users su ON su.id = m.sender_id
+       JOIN users ru ON ru.id = m.recipient_id
+       WHERE m.sender_id = ? OR m.recipient_id = ?
+       ORDER BY m.created_at DESC`
+    )
+    .all(myId, myId, myId);
+
+  const seen = new Set();
+  const conversations = [];
+  for (const row of rows) {
+    if (seen.has(row.username)) continue;
+    seen.add(row.username);
+    conversations.push(row);
+  }
+  res.json({ conversations });
+});
+
+// ---- Message history with one person ----------------------------------------
+app.get("/api/messages/:username", requireAuth, (req, res) => {
+  const myId = req.session.userId;
+  const other = db
+    .prepare("SELECT id, username FROM users WHERE username = ?")
+    .get(req.params.username);
+  if (!other) return res.status(404).json({ error: "No user with that username." });
+
+  const rows = db
+    .prepare(
+      `SELECT sender_id, body, created_at FROM messages
+       WHERE (sender_id = ? AND recipient_id = ?)
+          OR (sender_id = ? AND recipient_id = ?)
+       ORDER BY created_at ASC`
+    )
+    .all(myId, other.id, other.id, myId);
+
+  const messages = rows.map((r) => ({
+    body: r.body,
+    created_at: r.created_at,
+    mine: r.sender_id === myId,
+  }));
+  res.json({ messages });
+});
+
+// ---- Send a message ----------------------------------------------------------
+app.post("/api/messages", requireAuth, (req, res) => {
+  const myId = req.session.userId;
+  const { to, body } = req.body || {};
+
+  if (typeof to !== "string" || typeof body !== "string" || !body.trim()) {
+    return res.status(400).json({ error: "A recipient and message body are required." });
+  }
+  if (body.length > 2000) {
+    return res.status(400).json({ error: "Messages are limited to 2000 characters." });
+  }
+  if (to === req.session.username) {
+    return res.status(400).json({ error: "You can't message yourself." });
+  }
+
+  const recipient = db.prepare("SELECT id, username FROM users WHERE username = ?").get(to);
+  if (!recipient) return res.status(404).json({ error: "No user with that username." });
+
+  const trimmedBody = body.trim();
+  const info = db
+    .prepare("INSERT INTO messages (sender_id, recipient_id, body) VALUES (?, ?, ?)")
+    .run(myId, recipient.id, trimmedBody);
+  const created_at = db
+    .prepare("SELECT created_at FROM messages WHERE id = ?")
+    .get(info.lastInsertRowid).created_at;
+
+  // Push it to the recipient in real time if they're online right now.
+  const payload = {
+    from: req.session.username,
+    to: recipient.username,
+    body: trimmedBody,
+    created_at,
+  };
+  for (const socketId of onlineSockets.get(recipient.id) || []) {
+    io.to(socketId).emit("message", payload);
+  }
+
+  res.json({ ok: true, message: payload });
+});
+
+const server = http.createServer(app);
+const io = new Server(server);
+
+// Run the same session parsing socket.io connections go through so a
+// socket knows who's logged in — no separate login step for sockets.
+io.engine.use(sessionMiddleware);
+
+// userId -> Set of live socket ids, so someone logged in on two tabs/
+// devices gets the message pushed to both.
+const onlineSockets = new Map();
+
+io.on("connection", (socket) => {
+  const session = socket.request.session;
+  if (!session || !session.userId) {
+    socket.disconnect(true);
+    return;
+  }
+  const userId = session.userId;
+  if (!onlineSockets.has(userId)) onlineSockets.set(userId, new Set());
+  onlineSockets.get(userId).add(socket.id);
+
+  socket.on("disconnect", () => {
+    onlineSockets.get(userId)?.delete(socket.id);
+    if (onlineSockets.get(userId)?.size === 0) onlineSockets.delete(userId);
+  });
+});
+
+server.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });

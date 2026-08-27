@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Messages</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+<style>
+  body { height: 100vh; overflow: hidden; }
+  .back-link { display: none; font-size: 0.85rem; color: var(--bark); background: none; border: none; cursor: pointer; }
+  @media (max-width: 720px) {
+    .back-link { display: inline; }
+  }
+</style>
+</head>
+<body>
+  <div class="chat-page">
+    <aside class="chat-sidebar" id="sidebar">
+      <div class="chat-sidebar-header">
+        <p class="eyebrow">HEARTWOOD</p>
+        <h1 id="who-am-i">Messages</h1>
+      </div>
+
+      <form class="new-message" id="new-message-form">
+        <input id="new-username" placeholder="Message a username…" autocomplete="off" />
+        <button type="submit">Start</button>
+      </form>
+      <p class="new-message-error" id="new-message-error"></p>
+
+      <div class="conversation-list" id="conversation-list">
+        <p class="chat-sidebar-empty">No conversations yet — start one above.</p>
+      </div>
+    </aside>
+
+    <main class="chat-main" id="main">
+      <div class="chat-empty-state" id="empty-state">
+        Pick a conversation, or type a username to start one.
+      </div>
+
+      <div id="thread-view" hidden style="display: contents;">
+        <div class="chat-main-header">
+          <div>
+            <button class="back-link" id="back-link">&larr; Back</button>
+            <h2 id="thread-title">—</h2>
+          </div>
+          <a href="#" id="logout-link">Log out</a>
+        </div>
+        <div class="thread" id="thread"></div>
+        <form class="composer" id="composer">
+          <input id="composer-input" placeholder="Write a message…" autocomplete="off" maxlength="2000" />
+          <button type="submit">Send</button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="auth.js"></script>
+  <script src="messages.js"></script>
+</body>
+</html>
