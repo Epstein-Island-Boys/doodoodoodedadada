@@ -4,11 +4,14 @@
 // requireAuth pattern used below.
 
 const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
 const http = require("http");
 const express = require("express");
 const session = require("express-session");
 const bcrypt = require("bcrypt");
 const Database = require("better-sqlite3");
+const multer = require("multer");
 const { Server } = require("socket.io");
 
 const PORT = process.env.PORT || 3000;
@@ -25,6 +28,38 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
+
+// ---- Image uploads ----------------------------------------------------------
+// Sent images are saved to disk (not stored as base64 in SQLite) and served
+// back out from here. Same filesystem caveat as the database applies: on
+// hosts that wipe the disk on redeploy, uploaded images won't survive it.
+const UPLOADS_DIR = path.join(__dirname, "uploads");
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+app.use("/uploads", express.static(UPLOADS_DIR));
+
+const ALLOWED_IMAGE_TYPES = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+};
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+    filename: (req, file, cb) => {
+      const ext = ALLOWED_IMAGE_TYPES[file.mimetype] || "";
+      cb(null, crypto.randomBytes(16).toString("hex") + ext);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_IMAGE_TYPES[file.mimetype]) {
+      return cb(new Error("Only PNG, JPEG, GIF, and WEBP images are allowed."));
+    }
+    cb(null, true);
+  },
+});
 
 // ---- Database -------------------------------------------------------------
 // SQLite file lives next to this script. On some hosts (see README) the
@@ -47,9 +82,16 @@ db.exec(`
     sender_id INTEGER NOT NULL REFERENCES users(id),
     recipient_id INTEGER NOT NULL REFERENCES users(id),
     body TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'text',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
+// Migration for databases created before the `type` column existed —
+// CREATE TABLE IF NOT EXISTS above won't add it to an already-existing table.
+const messageColumns = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
+if (!messageColumns.includes("type")) {
+  db.exec("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'");
+}
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender_id, recipient_id)`);
 
 // ---- Sessions ---------------------------------------------------------------
@@ -161,6 +203,7 @@ app.get("/api/conversations", requireAuth, (req, res) => {
       `SELECT
          CASE WHEN m.sender_id = ? THEN ru.username ELSE su.username END AS username,
          m.body,
+         m.type,
          m.created_at
        FROM messages m
        JOIN users su ON su.id = m.sender_id
@@ -190,7 +233,7 @@ app.get("/api/messages/:username", requireAuth, (req, res) => {
 
   const rows = db
     .prepare(
-      `SELECT sender_id, body, created_at FROM messages
+      `SELECT sender_id, body, type, created_at FROM messages
        WHERE (sender_id = ? AND recipient_id = ?)
           OR (sender_id = ? AND recipient_id = ?)
        ORDER BY created_at ASC`
@@ -199,6 +242,7 @@ app.get("/api/messages/:username", requireAuth, (req, res) => {
 
   const messages = rows.map((r) => ({
     body: r.body,
+    type: r.type,
     created_at: r.created_at,
     mine: r.sender_id === myId,
   }));
@@ -236,6 +280,7 @@ app.post("/api/messages", requireAuth, (req, res) => {
     from: req.session.username,
     to: recipient.username,
     body: trimmedBody,
+    type: "text",
     created_at,
   };
   for (const socketId of onlineSockets.get(recipient.id) || []) {
@@ -243,6 +288,52 @@ app.post("/api/messages", requireAuth, (req, res) => {
   }
 
   res.json({ ok: true, message: payload });
+});
+
+// ---- Send an image message ---------------------------------------------------
+// Multipart upload: form fields `to` (recipient username) and `image` (file).
+// requireAuth runs first so an unauthenticated request never reaches multer.
+app.post("/api/messages/image", requireAuth, (req, res) => {
+  upload.single("image")(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No image provided." });
+
+    const cleanup = () => fs.unlink(req.file.path, () => {});
+
+    const myId = req.session.userId;
+    const to = (req.body && req.body.to) || "";
+    if (to === req.session.username) {
+      cleanup();
+      return res.status(400).json({ error: "You can't message yourself." });
+    }
+
+    const recipient = db.prepare("SELECT id, username FROM users WHERE username = ?").get(to);
+    if (!recipient) {
+      cleanup();
+      return res.status(404).json({ error: "No user with that username." });
+    }
+
+    const url = "/uploads/" + req.file.filename;
+    const info = db
+      .prepare("INSERT INTO messages (sender_id, recipient_id, body, type) VALUES (?, ?, ?, 'image')")
+      .run(myId, recipient.id, url);
+    const created_at = db
+      .prepare("SELECT created_at FROM messages WHERE id = ?")
+      .get(info.lastInsertRowid).created_at;
+
+    const payload = {
+      from: req.session.username,
+      to: recipient.username,
+      body: url,
+      type: "image",
+      created_at,
+    };
+    for (const socketId of onlineSockets.get(recipient.id) || []) {
+      io.to(socketId).emit("message", payload);
+    }
+
+    res.json({ ok: true, message: payload });
+  });
 });
 
 const server = http.createServer(app);
