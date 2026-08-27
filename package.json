@@ -10,8 +10,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@libsql/client": "^0.17.4",
     "bcrypt": "^6.0.0",
-    "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",
     "express-session": "^1.19.0",
     "multer": "^1.4.5-lts.1",
