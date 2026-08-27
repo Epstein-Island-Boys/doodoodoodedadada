@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Field Notes — Anatomy of a Tree</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ============================================================ -->
+  <!-- DECOY CONTENT: a small botanical field-guide page             -->
+  <!-- ============================================================ -->
+  <div id="decoy">
+    <header class="masthead">
+      <p class="eyebrow">FIELD NOTES · NO. 04</p>
+      <h1>Anatomy of a Tree</h1>
+      <p class="deck">A cross-section guide to what's underneath the bark.</p>
+    </header>
+
+    <main class="content">
+      <article class="copy">
+        <p>
+          Cut any trunk straight across and you'll find the tree keeping a
+          written record of itself. Every ring is a year; every layer has a
+          job. The outer bark is armor. Just beneath it, a thin green cambium
+          divides itself into new wood on one side and new bark on the other,
+          the only part of the trunk that is technically alive.
+        </p>
+        <p>
+          Sapwood carries water upward from root to leaf, season after
+          season, until it's eventually retired inward and sealed off. What's
+          left behind at the center no longer moves anything at all. It has
+          gone quiet, dense, and dark — a structural memory the tree keeps,
+          not for growing, but simply for standing.
+        </p>
+        <p class="caption">
+          Specimen: <em>Quercus robur</em>, English oak. Cross-section taken
+          at breast height, sixty-one growth rings visible.
+        </p>
+      </article>
+
+      <figure class="diagram" aria-label="Tree cross-section diagram">
+        <svg viewBox="0 0 420 420" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="210" cy="210" r="190" class="ring ring-bark"/>
+          <circle cx="210" cy="210" r="170" class="ring ring-cambium"/>
+          <circle cx="210" cy="210" r="155" class="ring ring-sapwood"/>
+          <circle cx="210" cy="210" r="95"  class="ring ring-heartwood"/>
+          <circle cx="210" cy="210" r="10"  class="ring ring-pith"/>
+
+          <!-- leader lines + labels -->
+          <g class="leader">
+            <line x1="210" y1="20"  x2="210" y2="60"/>
+            <text x="215" y="16">Bark</text>
+          </g>
+          <g class="leader">
+            <line x1="330" y1="90" x2="290" y2="130"/>
+            <text x="335" y="88">Cambium</text>
+          </g>
+          <g class="leader">
+            <line x1="360" y1="210" x2="300" y2="210"/>
+            <text x="364" y="214">Sapwood</text>
+          </g>
+          <!-- The word "Heartwood" doubles as the way in. Nothing on the
+               surface marks it as different from any other label. -->
+          <g class="leader" id="heartwood-label">
+            <line x1="210" y1="330" x2="210" y2="295"/>
+            <text x="177" y="345">Heartwood</text>
+          </g>
+        </svg>
+        <!-- Invisible hotspot sits exactly over the "Heartwood" label.
+             Fully transparent, no outline, no cursor change on the label
+             text itself — just a plain hit target. -->
+        <button id="hotspot" aria-label="" tabindex="-1"></button>
+      </figure>
+    </main>
+
+    <footer class="masthead-footer">
+      <p>Field Notes is a small periodical about ordinary trees.</p>
+    </footer>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- REAL SITE: hidden until the "unlocked" cookie is present       -->
+  <!-- ============================================================ -->
+  <div id="secret" hidden>
+    <div class="secret-card">
+      <p class="eyebrow">HEARTWOOD</p>
+      <h1>You found it.</h1>
+      <p class="deck">This is the real front door. Log in or make an account.</p>
+      <div class="secret-actions">
+        <a class="btn btn-primary" href="/login.html">Log in</a>
+        <a class="btn" href="/register.html">Create account</a>
+      </div>
+      <button class="link-btn" id="hide-again">Hide this again</button>
+    </div>
+  </div>
+
+  <script src="reveal.js"></script>
+</body>
+</html>

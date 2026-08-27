@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Create account</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="auth-page">
+    <div class="auth-card">
+      <p class="eyebrow">HEARTWOOD</p>
+      <h1>Create account</h1>
+      <p class="deck">Username and password only — no email needed.</p>
+
+      <form id="register-form">
+        <label class="field">
+          <label for="username">Username</label>
+          <input id="username" name="username" autocomplete="username" required />
+        </label>
+        <label class="field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="new-password" required />
+        </label>
+        <p class="error-msg" id="error"></p>
+        <button class="btn btn-primary" type="submit">Create account</button>
+      </form>
+
+      <p class="switch-link">Already have one? <a href="/login.html">Log in</a></p>
+    </div>
+  </div>
+
+  <script src="auth.js"></script>
+  <script>
+    requireUnlocked();
+
+    document.getElementById("register-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorEl = document.getElementById("error");
+      errorEl.textContent = "";
+      try {
+        await apiPost("/api/register", {
+          username: document.getElementById("username").value.trim(),
+          password: document.getElementById("password").value,
+        });
+        window.location.href = "/dashboard.html";
+      } catch (err) {
+        errorEl.textContent = err.message;
+      }
+    });
+  </script>
+</body>
+</html>

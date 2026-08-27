@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,600&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="auth-page">
+    <div class="auth-card">
+      <p class="eyebrow">HEARTWOOD</p>
+      <h1 id="welcome">Welcome</h1>
+      <p class="deck">Messaging, calls, and posts land here next.</p>
+      <button class="btn" id="logout">Log out</button>
+    </div>
+  </div>
+
+  <script src="auth.js"></script>
+  <script>
+    (async () => {
+      const me = await apiGet("/api/me");
+      if (!me.loggedIn) {
+        window.location.href = "/login.html";
+        return;
+      }
+      document.getElementById("welcome").textContent = `Welcome, ${me.username}`;
+    })();
+
+    document.getElementById("logout").addEventListener("click", async () => {
+      await fetch("/api/logout", { method: "POST", credentials: "same-origin" });
+      window.location.href = "/index.html";
+    });
+  </script>
+</body>
+</html>
