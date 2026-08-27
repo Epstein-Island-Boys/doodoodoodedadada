@@ -15,6 +15,14 @@ const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-this-in-production";
 
 const app = express();
+// Most hosts (Render, Railway, Fly, Heroku, etc.) terminate HTTPS at a proxy
+// in front of the app and forward plain HTTP to us. Without this, Express
+// thinks every request is insecure, so the `secure: true` cookie below never
+// actually gets set once NODE_ENV=production — and you get logged in but
+// immediately bounced back to the login screen because no session cookie
+// ever reaches the browser. This line tells Express to trust the proxy's
+// X-Forwarded-Proto header instead.
+app.set("trust proxy", 1);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 

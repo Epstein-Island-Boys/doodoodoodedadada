@@ -6,10 +6,24 @@
   --sage: #8CA37A;
   --heartwood: #A2582B;
   --line: rgba(30, 35, 23, 0.14);
+  --surface: #FFFFFF;
+  --bubble-theirs: #EDE7D3;
 
   --serif: "Fraunces", Georgia, serif;
   --sans: "Inter", -apple-system, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+:root[data-theme="dark"] {
+  --paper: #1B1F17;
+  --ink: #E7E4D6;
+  --forest: #9CB088;
+  --bark: #C2A87E;
+  --sage: #6C8A5B;
+  --heartwood: #D98A52;
+  --line: rgba(231, 228, 214, 0.14);
+  --surface: #262B20;
+  --bubble-theirs: #2E3427;
 }
 
 * { box-sizing: border-box; }
@@ -20,6 +34,35 @@ body {
   color: var(--ink);
   font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+/* ---------- Dark mode toggle ---------- */
+
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.theme-toggle:hover { background: rgba(140, 163, 122, 0.15); }
+
+.theme-toggle-corner {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 10;
 }
 
 /* ---------- Decoy page ---------- */
@@ -249,7 +292,7 @@ h1 {
   font-size: 1rem;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface);
   color: var(--ink);
 }
 
@@ -299,6 +342,10 @@ h1 {
 .chat-sidebar-header {
   padding: 20px 18px 14px;
   border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .chat-sidebar-header .eyebrow { margin-bottom: 4px; }
@@ -322,7 +369,7 @@ h1 {
   font-size: 0.9rem;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .new-message button {
@@ -445,7 +492,7 @@ h1 {
 
 .bubble.theirs {
   align-self: flex-start;
-  background: #EDE7D3;
+  background: var(--bubble-theirs);
   color: var(--ink);
   border-bottom-left-radius: 4px;
 }
@@ -470,7 +517,7 @@ h1 {
   font-size: 0.95rem;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .composer button {
