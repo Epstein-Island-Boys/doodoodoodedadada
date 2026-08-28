@@ -35,6 +35,14 @@ const db = createClient({
   authToken: TURSO_AUTH_TOKEN,
 });
 
+// Usernames are stored with whatever case the person picked (so their
+// profile still shows "John"), but every lookup — login, search, DMing,
+// mute/block, replies — goes through this lowercase column instead so
+// "John", "john", and "JOHN" are all the same account.
+function usernameLower(u) {
+  return String(u).toLowerCase();
+}
+
 async function initDb() {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS users (
@@ -67,6 +75,16 @@ async function initDb() {
   if (!messageColumns.includes("read_at")) {
     await db.execute("ALTER TABLE messages ADD COLUMN read_at TEXT");
   }
+  // Editing / deleting / replying.
+  if (!messageColumns.includes("edited_at")) {
+    await db.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT");
+  }
+  if (!messageColumns.includes("deleted")) {
+    await db.execute("ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!messageColumns.includes("reply_to_id")) {
+    await db.execute("ALTER TABLE messages ADD COLUMN reply_to_id INTEGER");
+  }
   await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender_id, recipient_id)");
 
   // One shared room every user can post to and see. Kept as its own table
@@ -82,6 +100,18 @@ async function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+
+  const globalCols = await db.execute("PRAGMA table_info(global_messages)");
+  const globalMessageColumns = globalCols.rows.map((c) => c.name);
+  if (!globalMessageColumns.includes("edited_at")) {
+    await db.execute("ALTER TABLE global_messages ADD COLUMN edited_at TEXT");
+  }
+  if (!globalMessageColumns.includes("deleted")) {
+    await db.execute("ALTER TABLE global_messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!globalMessageColumns.includes("reply_to_id")) {
+    await db.execute("ALTER TABLE global_messages ADD COLUMN reply_to_id INTEGER");
+  }
 
   // Mutes/blocks: one row per (owner, target) pair. A user can only have one
   // relation toward another at a time — setting 'blocked' over an existing
@@ -110,6 +140,21 @@ async function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+
+  // ---- Profile settings: case-insensitive lookups, avatars, name color ----
+  const userCols = await db.execute("PRAGMA table_info(users)");
+  const userColumns = userCols.rows.map((c) => c.name);
+  if (!userColumns.includes("username_lower")) {
+    await db.execute("ALTER TABLE users ADD COLUMN username_lower TEXT");
+    await db.execute("UPDATE users SET username_lower = LOWER(username) WHERE username_lower IS NULL");
+  }
+  await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (username_lower)");
+  if (!userColumns.includes("name_color")) {
+    await db.execute("ALTER TABLE users ADD COLUMN name_color TEXT");
+  }
+  if (!userColumns.includes("avatar_image_id")) {
+    await db.execute("ALTER TABLE users ADD COLUMN avatar_image_id INTEGER");
+  }
 }
 
 const app = express();
@@ -167,6 +212,7 @@ app.use(sessionMiddleware);
 
 // ---- Validation helpers -----------------------------------------------------
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 function validateCredentials(username, password) {
   if (typeof username !== "string" || typeof password !== "string") {
@@ -188,6 +234,18 @@ function insertedId(result) {
   return Number(result.lastInsertRowid);
 }
 
+function avatarUrlFor(avatarImageId) {
+  return avatarImageId ? "/api/images/" + avatarImageId : null;
+}
+
+async function getUserByUsername(username) {
+  const result = await db.execute({
+    sql: "SELECT id, username, name_color, avatar_image_id FROM users WHERE username_lower = ?",
+    args: [usernameLower(username)],
+  });
+  return result.rows[0] || null;
+}
+
 // ---- Auth routes ------------------------------------------------------------
 app.post("/api/register", async (req, res) => {
   const { username, password } = req.body || {};
@@ -195,15 +253,15 @@ app.post("/api/register", async (req, res) => {
   if (error) return res.status(400).json({ error });
 
   const existing = await db.execute({
-    sql: "SELECT id FROM users WHERE username = ?",
-    args: [username],
+    sql: "SELECT id FROM users WHERE username_lower = ?",
+    args: [usernameLower(username)],
   });
   if (existing.rows.length) return res.status(409).json({ error: "That username is taken." });
 
   const password_hash = await bcrypt.hash(password, 12);
   const info = await db.execute({
-    sql: "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-    args: [username, password_hash],
+    sql: "INSERT INTO users (username, username_lower, password_hash) VALUES (?, ?, ?)",
+    args: [username, usernameLower(username), password_hash],
   });
 
   req.session.userId = insertedId(info);
@@ -218,8 +276,8 @@ app.post("/api/login", async (req, res) => {
   }
 
   const result = await db.execute({
-    sql: "SELECT * FROM users WHERE username = ?",
-    args: [username],
+    sql: "SELECT * FROM users WHERE username_lower = ?",
+    args: [usernameLower(username)],
   });
   const user = result.rows[0];
   if (!user) return res.status(401).json({ error: "Invalid username or password." });
@@ -236,12 +294,22 @@ app.post("/api/logout", (req, res) => {
   req.session.destroy(() => res.json({ ok: true }));
 });
 
-app.get("/api/me", (req, res) => {
-  if (req.session.userId) {
-    res.json({ loggedIn: true, username: req.session.username });
-  } else {
-    res.json({ loggedIn: false });
-  }
+app.get("/api/me", async (req, res) => {
+  if (!req.session.userId) return res.json({ loggedIn: false });
+
+  const result = await db.execute({
+    sql: "SELECT username, name_color, avatar_image_id FROM users WHERE id = ?",
+    args: [req.session.userId],
+  });
+  const user = result.rows[0];
+  if (!user) return res.json({ loggedIn: false });
+
+  res.json({
+    loggedIn: true,
+    username: user.username,
+    nameColor: user.name_color || null,
+    avatarUrl: avatarUrlFor(user.avatar_image_id),
+  });
 });
 
 // ---- Auth guard for future protected routes --------------------------------
@@ -252,15 +320,108 @@ function requireAuth(req, res, next) {
 
 // ---- User lookup ------------------------------------------------------------
 // Lets the "type a username to start a message" box confirm the person
-// exists before opening a thread for them.
+// exists before opening a thread for them. Case-insensitive: searching
+// "jOHn" finds the account registered as "John".
 app.get("/api/users/:username", requireAuth, async (req, res) => {
+  const user = await getUserByUsername(req.params.username);
+  if (!user) return res.status(404).json({ error: "No user with that username." });
+  res.json({
+    username: user.username,
+    nameColor: user.name_color || null,
+    avatarUrl: avatarUrlFor(user.avatar_image_id),
+  });
+});
+
+// ---- Account settings --------------------------------------------------------
+app.post("/api/account/username", requireAuth, async (req, res) => {
+  const { username } = req.body || {};
+  if (typeof username !== "string" || !USERNAME_RE.test(username)) {
+    return res.status(400).json({ error: "Username must be 3-20 characters: letters, numbers, underscore." });
+  }
+
+  const existing = await db.execute({
+    sql: "SELECT id FROM users WHERE username_lower = ? AND id != ?",
+    args: [usernameLower(username), req.session.userId],
+  });
+  if (existing.rows.length) return res.status(409).json({ error: "That username is taken." });
+
+  await db.execute({
+    sql: "UPDATE users SET username = ?, username_lower = ? WHERE id = ?",
+    args: [username, usernameLower(username), req.session.userId],
+  });
+  req.session.username = username;
+  res.json({ ok: true, username });
+});
+
+app.post("/api/account/password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== "string" || typeof newPassword !== "string") {
+    return res.status(400).json({ error: "Current and new password are required." });
+  }
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: "New password must be at least 8 characters." });
+  }
+
   const result = await db.execute({
-    sql: "SELECT username FROM users WHERE username = ?",
-    args: [req.params.username],
+    sql: "SELECT password_hash FROM users WHERE id = ?",
+    args: [req.session.userId],
   });
   const user = result.rows[0];
-  if (!user) return res.status(404).json({ error: "No user with that username." });
-  res.json({ username: user.username });
+  if (!user) return res.status(401).json({ error: "Not logged in." });
+
+  const ok = await bcrypt.compare(currentPassword, user.password_hash);
+  if (!ok) return res.status(401).json({ error: "Current password is incorrect." });
+
+  const password_hash = await bcrypt.hash(newPassword, 12);
+  await db.execute({
+    sql: "UPDATE users SET password_hash = ? WHERE id = ?",
+    args: [password_hash, req.session.userId],
+  });
+  res.json({ ok: true });
+});
+
+app.post("/api/account/color", requireAuth, async (req, res) => {
+  const { color } = req.body || {};
+  if (color !== null && !HEX_COLOR_RE.test(color || "")) {
+    return res.status(400).json({ error: "Color must be a hex value like #a2582b, or null to reset." });
+  }
+  await db.execute({
+    sql: "UPDATE users SET name_color = ? WHERE id = ?",
+    args: [color, req.session.userId],
+  });
+  res.json({ ok: true, color: color || null });
+});
+
+app.post("/api/account/avatar", requireAuth, (req, res) => {
+  upload.single("avatar")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No image provided." });
+
+    try {
+      const myId = req.session.userId;
+      const imageInfo = await db.execute({
+        sql: "INSERT INTO images (mime_type, data, uploaded_by) VALUES (?, ?, ?)",
+        args: [req.file.mimetype, req.file.buffer, myId],
+      });
+      const imageId = insertedId(imageInfo);
+      await db.execute({
+        sql: "UPDATE users SET avatar_image_id = ? WHERE id = ?",
+        args: [imageId, myId],
+      });
+      res.json({ ok: true, avatarUrl: avatarUrlFor(imageId) });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
+app.delete("/api/account/avatar", requireAuth, async (req, res) => {
+  await db.execute({
+    sql: "UPDATE users SET avatar_image_id = NULL WHERE id = ?",
+    args: [req.session.userId],
+  });
+  res.json({ ok: true });
 });
 
 // ---- Mute / block relations --------------------------------------------------
@@ -295,15 +456,11 @@ app.post("/api/relations", requireAuth, async (req, res) => {
   if (relation !== null && relation !== "muted" && relation !== "blocked") {
     return res.status(400).json({ error: "relation must be 'muted', 'blocked', or null." });
   }
-  if (target === req.session.username) {
+  if (usernameLower(target) === usernameLower(req.session.username)) {
     return res.status(400).json({ error: "You can't mute or block yourself." });
   }
 
-  const targetResult = await db.execute({
-    sql: "SELECT id FROM users WHERE username = ?",
-    args: [target],
-  });
-  const targetUser = targetResult.rows[0];
+  const targetUser = await getUserByUsername(target);
   if (!targetUser) return res.status(404).json({ error: "No user with that username." });
 
   if (relation === null) {
@@ -318,25 +475,30 @@ app.post("/api/relations", requireAuth, async (req, res) => {
       args: [req.session.userId, targetUser.id, relation],
     });
   }
-  res.json({ ok: true, target, relation });
+  res.json({ ok: true, target: targetUser.username, relation });
 });
 
 
-// One row per person you've exchanged messages with, most recent first.
+// One row per person you've exchanged messages with, most recent first, plus
+// how many of their messages to you are still unread.
 app.get("/api/conversations", requireAuth, async (req, res) => {
   const myId = req.session.userId;
   const result = await db.execute({
     sql: `SELECT
+         CASE WHEN m.sender_id = ? THEN ru.id ELSE su.id END AS other_id,
          CASE WHEN m.sender_id = ? THEN ru.username ELSE su.username END AS username,
+         CASE WHEN m.sender_id = ? THEN ru.name_color ELSE su.name_color END AS name_color,
+         CASE WHEN m.sender_id = ? THEN ru.avatar_image_id ELSE su.avatar_image_id END AS avatar_image_id,
          m.body,
          m.type,
+         m.deleted,
          m.created_at
        FROM messages m
        JOIN users su ON su.id = m.sender_id
        JOIN users ru ON ru.id = m.recipient_id
        WHERE m.sender_id = ? OR m.recipient_id = ?
        ORDER BY m.created_at DESC`,
-    args: [myId, myId, myId],
+    args: [myId, myId, myId, myId, myId, myId],
   });
 
   const seen = new Set();
@@ -346,33 +508,66 @@ app.get("/api/conversations", requireAuth, async (req, res) => {
     seen.add(row.username);
     conversations.push(row);
   }
-  res.json({ conversations });
+
+  const unreadResult = await db.execute({
+    sql: `SELECT sender_id, COUNT(*) AS unread
+          FROM messages
+          WHERE recipient_id = ? AND read_at IS NULL
+          GROUP BY sender_id`,
+    args: [myId],
+  });
+  const unreadByOtherId = new Map(unreadResult.rows.map((r) => [Number(r.sender_id), Number(r.unread)]));
+
+  res.json({
+    conversations: conversations.map((c) => ({
+      username: c.username,
+      body: c.deleted ? "" : c.body,
+      type: c.type,
+      deleted: !!c.deleted,
+      created_at: c.created_at,
+      nameColor: c.name_color || null,
+      avatarUrl: avatarUrlFor(c.avatar_image_id),
+      unread: unreadByOtherId.get(Number(c.other_id)) || 0,
+    })),
+  });
 });
 
 // ---- Message history with one person ----------------------------------------
 app.get("/api/messages/:username", requireAuth, async (req, res) => {
   const myId = req.session.userId;
-  const otherResult = await db.execute({
-    sql: "SELECT id, username FROM users WHERE username = ?",
-    args: [req.params.username],
-  });
-  const other = otherResult.rows[0];
+  const other = await getUserByUsername(req.params.username);
   if (!other) return res.status(404).json({ error: "No user with that username." });
 
   const result = await db.execute({
-    sql: `SELECT sender_id, body, type, created_at, read_at FROM messages
-       WHERE (sender_id = ? AND recipient_id = ?)
-          OR (sender_id = ? AND recipient_id = ?)
-       ORDER BY created_at ASC`,
+    sql: `SELECT m.id, m.sender_id, m.body, m.type, m.created_at, m.read_at, m.edited_at, m.deleted,
+                 m.reply_to_id, rm.body AS reply_body, rm.type AS reply_type, rm.deleted AS reply_deleted,
+                 rm.sender_id AS reply_sender_id
+          FROM messages m
+          LEFT JOIN messages rm ON rm.id = m.reply_to_id
+          WHERE (m.sender_id = ? AND m.recipient_id = ?)
+             OR (m.sender_id = ? AND m.recipient_id = ?)
+          ORDER BY m.created_at ASC, m.id ASC`,
     args: [myId, other.id, other.id, myId],
   });
 
   const messages = result.rows.map((r) => ({
-    body: r.body,
+    id: r.id,
+    body: r.deleted ? "" : r.body,
     type: r.type,
     created_at: r.created_at,
     mine: r.sender_id === myId,
     read: r.read_at != null,
+    edited: r.edited_at != null,
+    deleted: !!r.deleted,
+    reply: r.reply_to_id
+      ? {
+          id: r.reply_to_id,
+          body: r.reply_deleted ? "" : r.reply_body,
+          type: r.reply_type,
+          deleted: !!r.reply_deleted,
+          sender: r.reply_sender_id === myId ? "me" : other.username,
+        }
+      : null,
   }));
   res.json({ messages });
 });
@@ -380,11 +575,7 @@ app.get("/api/messages/:username", requireAuth, async (req, res) => {
 // ---- Mark all of someone's messages to me as read ----------------------------
 app.post("/api/messages/:username/read", requireAuth, async (req, res) => {
   const myId = req.session.userId;
-  const otherResult = await db.execute({
-    sql: "SELECT id, username FROM users WHERE username = ?",
-    args: [req.params.username],
-  });
-  const other = otherResult.rows[0];
+  const other = await getUserByUsername(req.params.username);
   if (!other) return res.status(404).json({ error: "No user with that username." });
 
   const updated = await db.execute({
@@ -402,10 +593,22 @@ app.post("/api/messages/:username/read", requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Fetch a DM message plus who it belongs to, used by the edit/delete routes
+// below to check ownership and figure out who to notify.
+async function getOwnedMessage(id, myId) {
+  const result = await db.execute({
+    sql: "SELECT id, sender_id, recipient_id, type, deleted FROM messages WHERE id = ?",
+    args: [id],
+  });
+  const row = result.rows[0];
+  if (!row || row.sender_id !== myId) return null;
+  return row;
+}
+
 // ---- Send a message ----------------------------------------------------------
 app.post("/api/messages", requireAuth, async (req, res) => {
   const myId = req.session.userId;
-  const { to, body } = req.body || {};
+  const { to, body, replyTo } = req.body || {};
 
   if (typeof to !== "string" || typeof body !== "string" || !body.trim()) {
     return res.status(400).json({ error: "A recipient and message body are required." });
@@ -413,15 +616,11 @@ app.post("/api/messages", requireAuth, async (req, res) => {
   if (body.length > 2000) {
     return res.status(400).json({ error: "Messages are limited to 2000 characters." });
   }
-  if (to === req.session.username) {
+  if (usernameLower(to) === usernameLower(req.session.username)) {
     return res.status(400).json({ error: "You can't message yourself." });
   }
 
-  const recipientResult = await db.execute({
-    sql: "SELECT id, username FROM users WHERE username = ?",
-    args: [to],
-  });
-  const recipient = recipientResult.rows[0];
+  const recipient = await getUserByUsername(to);
   if (!recipient) return res.status(404).json({ error: "No user with that username." });
 
   const theirRelationToMe = await getRelation(recipient.id, myId);
@@ -429,10 +628,31 @@ app.post("/api/messages", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "You can't message this user." });
   }
 
+  let replyToId = null;
+  let replyPreview = null;
+  if (replyTo != null) {
+    const replyResult = await db.execute({
+      sql: `SELECT id, sender_id, body, type, deleted FROM messages
+            WHERE id = ? AND ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?))`,
+      args: [Number(replyTo), myId, recipient.id, recipient.id, myId],
+    });
+    const replied = replyResult.rows[0];
+    if (replied) {
+      replyToId = replied.id;
+      replyPreview = {
+        id: replied.id,
+        body: replied.deleted ? "" : replied.body,
+        type: replied.type,
+        deleted: !!replied.deleted,
+        sender: replied.sender_id === myId ? "me" : recipient.username,
+      };
+    }
+  }
+
   const trimmedBody = body.trim();
   const info = await db.execute({
-    sql: "INSERT INTO messages (sender_id, recipient_id, body) VALUES (?, ?, ?)",
-    args: [myId, recipient.id, trimmedBody],
+    sql: "INSERT INTO messages (sender_id, recipient_id, body, reply_to_id) VALUES (?, ?, ?, ?)",
+    args: [myId, recipient.id, trimmedBody, replyToId],
   });
   const createdResult = await db.execute({
     sql: "SELECT created_at FROM messages WHERE id = ?",
@@ -442,17 +662,68 @@ app.post("/api/messages", requireAuth, async (req, res) => {
 
   // Push it to the recipient in real time if they're online right now.
   const payload = {
+    id: insertedId(info),
     from: req.session.username,
     to: recipient.username,
     body: trimmedBody,
     type: "text",
     created_at,
+    reply: replyPreview,
   };
   for (const socketId of onlineSockets.get(recipient.id) || []) {
     io.to(socketId).emit("message", payload);
   }
 
   res.json({ ok: true, message: payload });
+});
+
+// ---- Edit / delete a DM message -----------------------------------------------
+app.patch("/api/messages/:id", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const id = Number(req.params.id);
+  const { body } = req.body || {};
+  if (typeof body !== "string" || !body.trim()) {
+    return res.status(400).json({ error: "A message body is required." });
+  }
+  if (body.length > 2000) {
+    return res.status(400).json({ error: "Messages are limited to 2000 characters." });
+  }
+
+  const msg = await getOwnedMessage(id, myId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+  if (msg.type !== "text") return res.status(400).json({ error: "Only text messages can be edited." });
+  if (msg.deleted) return res.status(400).json({ error: "That message was deleted." });
+
+  const trimmedBody = body.trim();
+  await db.execute({
+    sql: "UPDATE messages SET body = ?, edited_at = datetime('now') WHERE id = ?",
+    args: [trimmedBody, id],
+  });
+
+  const payload = { id, body: trimmedBody };
+  for (const socketId of onlineSockets.get(msg.recipient_id) || []) {
+    io.to(socketId).emit("message-edited", payload);
+  }
+  res.json({ ok: true, message: payload });
+});
+
+app.delete("/api/messages/:id", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const id = Number(req.params.id);
+
+  const msg = await getOwnedMessage(id, myId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+
+  await db.execute({
+    sql: "UPDATE messages SET body = '', deleted = 1 WHERE id = ?",
+    args: [id],
+  });
+
+  const payload = { id };
+  for (const socketId of onlineSockets.get(msg.recipient_id) || []) {
+    io.to(socketId).emit("message-deleted", payload);
+  }
+  res.json({ ok: true, id });
 });
 
 // ---- Send an image message ---------------------------------------------------
@@ -468,15 +739,11 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
     try {
       const myId = req.session.userId;
       const to = (req.body && req.body.to) || "";
-      if (to === req.session.username) {
+      if (usernameLower(to) === usernameLower(req.session.username)) {
         return res.status(400).json({ error: "You can't message yourself." });
       }
 
-      const recipientResult = await db.execute({
-        sql: "SELECT id, username FROM users WHERE username = ?",
-        args: [to],
-      });
-      const recipient = recipientResult.rows[0];
+      const recipient = await getUserByUsername(to);
       if (!recipient) return res.status(404).json({ error: "No user with that username." });
 
       const theirRelationToMe = await getRelation(recipient.id, myId);
@@ -501,11 +768,13 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
       const created_at = createdResult.rows[0].created_at;
 
       const payload = {
+        id: insertedId(info),
         from: req.session.username,
         to: recipient.username,
         body: url,
         type: "image",
         created_at,
+        reply: null,
       };
       for (const socketId of onlineSockets.get(recipient.id) || []) {
         io.to(socketId).emit("message", payload);
@@ -526,21 +795,39 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
 const GLOBAL_HISTORY_LIMIT = 200;
 
 app.get("/api/global/messages", requireAuth, async (req, res) => {
-  const myId = req.session.userId;
   const result = await db.execute({
-    sql: `SELECT u.username AS sender, g.body, g.type, g.created_at
+    sql: `SELECT g.id, g.sender_id, u.username AS sender, u.name_color, u.avatar_image_id,
+                 g.body, g.type, g.created_at, g.edited_at, g.deleted, g.reply_to_id,
+                 rg.body AS reply_body, rg.type AS reply_type, rg.deleted AS reply_deleted,
+                 ru.username AS reply_sender
           FROM global_messages g
           JOIN users u ON u.id = g.sender_id
+          LEFT JOIN global_messages rg ON rg.id = g.reply_to_id
+          LEFT JOIN users ru ON ru.id = rg.sender_id
           ORDER BY g.created_at ASC, g.id ASC
           LIMIT ?`,
     args: [GLOBAL_HISTORY_LIMIT],
   });
   const messages = result.rows.map((r) => ({
+    id: r.id,
     sender: r.sender,
-    body: r.body,
+    nameColor: r.name_color || null,
+    avatarUrl: avatarUrlFor(r.avatar_image_id),
+    body: r.deleted ? "" : r.body,
     type: r.type,
     created_at: r.created_at,
+    edited: r.edited_at != null,
+    deleted: !!r.deleted,
     mine: r.sender === req.session.username,
+    reply: r.reply_to_id
+      ? {
+          id: r.reply_to_id,
+          body: r.reply_deleted ? "" : r.reply_body,
+          type: r.reply_type,
+          deleted: !!r.reply_deleted,
+          sender: r.reply_sender,
+        }
+      : null,
   }));
   res.json({ messages });
 });
@@ -552,8 +839,90 @@ function broadcastGlobal(payload, exceptUserId) {
   }
 }
 
+// Used for edits/deletes/reads — everyone gets it, including the sender's
+// other open tabs, so every view of the global room stays in sync.
+function broadcastGlobalAll(event, payload) {
+  for (const socketIds of onlineSockets.values()) {
+    for (const socketId of socketIds) io.to(socketId).emit(event, payload);
+  }
+}
+
 app.post("/api/global/messages", requireAuth, async (req, res) => {
   const myId = req.session.userId;
+  const { body, replyTo } = req.body || {};
+  if (typeof body !== "string" || !body.trim()) {
+    return res.status(400).json({ error: "A message body is required." });
+  }
+  if (body.length > 2000) {
+    return res.status(400).json({ error: "Messages are limited to 2000 characters." });
+  }
+
+  let replyToId = null;
+  let replyPreview = null;
+  if (replyTo != null) {
+    const replyResult = await db.execute({
+      sql: `SELECT g.id, g.body, g.type, g.deleted, u.username AS sender
+            FROM global_messages g JOIN users u ON u.id = g.sender_id
+            WHERE g.id = ?`,
+      args: [Number(replyTo)],
+    });
+    const replied = replyResult.rows[0];
+    if (replied) {
+      replyToId = replied.id;
+      replyPreview = {
+        id: replied.id,
+        body: replied.deleted ? "" : replied.body,
+        type: replied.type,
+        deleted: !!replied.deleted,
+        sender: replied.sender,
+      };
+    }
+  }
+
+  const trimmedBody = body.trim();
+  const info = await db.execute({
+    sql: "INSERT INTO global_messages (sender_id, body, reply_to_id) VALUES (?, ?, ?)",
+    args: [myId, trimmedBody, replyToId],
+  });
+  const createdResult = await db.execute({
+    sql: "SELECT created_at FROM global_messages WHERE id = ?",
+    args: [insertedId(info)],
+  });
+
+  const meResult = await db.execute({
+    sql: "SELECT name_color, avatar_image_id FROM users WHERE id = ?",
+    args: [myId],
+  });
+  const me = meResult.rows[0] || {};
+
+  const payload = {
+    id: insertedId(info),
+    sender: req.session.username,
+    nameColor: me.name_color || null,
+    avatarUrl: avatarUrlFor(me.avatar_image_id),
+    body: trimmedBody,
+    type: "text",
+    created_at: createdResult.rows[0].created_at,
+    reply: replyPreview,
+  };
+  broadcastGlobal(payload, myId);
+  res.json({ ok: true, message: payload });
+});
+
+// ---- Edit / delete a global message -------------------------------------------
+async function getOwnedGlobalMessage(id, myId) {
+  const result = await db.execute({
+    sql: "SELECT id, sender_id, type, deleted FROM global_messages WHERE id = ?",
+    args: [id],
+  });
+  const row = result.rows[0];
+  if (!row || row.sender_id !== myId) return null;
+  return row;
+}
+
+app.patch("/api/global/messages/:id", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const id = Number(req.params.id);
   const { body } = req.body || {};
   if (typeof body !== "string" || !body.trim()) {
     return res.status(400).json({ error: "A message body is required." });
@@ -562,24 +931,35 @@ app.post("/api/global/messages", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Messages are limited to 2000 characters." });
   }
 
+  const msg = await getOwnedGlobalMessage(id, myId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+  if (msg.type !== "text") return res.status(400).json({ error: "Only text messages can be edited." });
+  if (msg.deleted) return res.status(400).json({ error: "That message was deleted." });
+
   const trimmedBody = body.trim();
-  const info = await db.execute({
-    sql: "INSERT INTO global_messages (sender_id, body) VALUES (?, ?)",
-    args: [myId, trimmedBody],
-  });
-  const createdResult = await db.execute({
-    sql: "SELECT created_at FROM global_messages WHERE id = ?",
-    args: [insertedId(info)],
+  await db.execute({
+    sql: "UPDATE global_messages SET body = ?, edited_at = datetime('now') WHERE id = ?",
+    args: [trimmedBody, id],
   });
 
-  const payload = {
-    sender: req.session.username,
-    body: trimmedBody,
-    type: "text",
-    created_at: createdResult.rows[0].created_at,
-  };
-  broadcastGlobal(payload, myId);
-  res.json({ ok: true, message: payload });
+  broadcastGlobalAll("global-message-edited", { id, body: trimmedBody });
+  res.json({ ok: true, message: { id, body: trimmedBody } });
+});
+
+app.delete("/api/global/messages/:id", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const id = Number(req.params.id);
+
+  const msg = await getOwnedGlobalMessage(id, myId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+
+  await db.execute({
+    sql: "UPDATE global_messages SET body = '', deleted = 1 WHERE id = ?",
+    args: [id],
+  });
+
+  broadcastGlobalAll("global-message-deleted", { id });
+  res.json({ ok: true, id });
 });
 
 app.post("/api/global/messages/image", requireAuth, (req, res) => {
@@ -604,11 +984,21 @@ app.post("/api/global/messages/image", requireAuth, (req, res) => {
         args: [insertedId(info)],
       });
 
+      const meResult = await db.execute({
+        sql: "SELECT name_color, avatar_image_id FROM users WHERE id = ?",
+        args: [myId],
+      });
+      const me = meResult.rows[0] || {};
+
       const payload = {
+        id: insertedId(info),
         sender: req.session.username,
+        nameColor: me.name_color || null,
+        avatarUrl: avatarUrlFor(me.avatar_image_id),
         body: url,
         type: "image",
         created_at: createdResult.rows[0].created_at,
+        reply: null,
       };
       broadcastGlobal(payload, myId);
       res.json({ ok: true, message: payload });

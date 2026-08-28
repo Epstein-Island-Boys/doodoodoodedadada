@@ -24,7 +24,10 @@
           <p class="eyebrow">HEARTWOOD</p>
           <h1 id="who-am-i">Messages</h1>
         </div>
-        <button class="theme-toggle" data-theme-toggle></button>
+        <div class="chat-sidebar-header-actions">
+          <button class="theme-toggle" data-theme-toggle></button>
+          <button class="theme-toggle" id="settings-btn" aria-label="Settings">⚙️</button>
+        </div>
       </div>
 
       <div class="notif-banner is-hidden" id="notif-banner">
@@ -65,11 +68,18 @@
             <button class="back-link" id="back-link">&larr; Back</button>
             <h2 id="thread-title">—</h2>
           </div>
-          <a href="#" id="logout-link">Log out</a>
+          <button type="button" class="icon-btn" id="settings-btn-thread" aria-label="Settings">⚙️</button>
         </div>
         <div class="thread-wrap" id="thread-wrap">
           <div class="thread" id="thread"></div>
           <div class="drop-hint is-hidden" id="drop-hint">Drop image to send</div>
+        </div>
+        <div class="reply-bar is-hidden" id="reply-bar">
+          <div class="reply-bar-info">
+            <span class="reply-bar-label">Replying to <span id="reply-bar-name"></span></span>
+            <span class="reply-bar-preview" id="reply-bar-preview"></span>
+          </div>
+          <button type="button" id="reply-bar-cancel" aria-label="Cancel reply">✕</button>
         </div>
         <form class="composer" id="composer">
           <div class="composer-tools">
@@ -93,6 +103,82 @@
   <div class="context-menu is-hidden" id="conv-menu">
     <button type="button" id="conv-menu-mute">Mute</button>
     <button type="button" id="conv-menu-block">Block</button>
+  </div>
+
+  <!-- Image lightbox: click any uploaded image to view it full-size. -->
+  <div class="lightbox is-hidden" id="lightbox">
+    <button type="button" class="lightbox-close" id="lightbox-close" aria-label="Close">✕</button>
+    <img id="lightbox-img" src="" alt="Full-size image" />
+  </div>
+
+  <!-- Settings modal -->
+  <div class="modal-overlay is-hidden" id="settings-overlay">
+    <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button type="button" class="icon-btn" id="settings-close" aria-label="Close settings">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <section class="settings-section">
+          <h3>Profile picture</h3>
+          <div class="avatar-row">
+            <div class="avatar-preview" id="avatar-preview">
+              <span id="avatar-preview-initial">?</span>
+              <img id="avatar-preview-img" class="is-hidden" alt="Your profile picture" />
+            </div>
+            <div class="avatar-row-actions">
+              <button type="button" class="btn" id="avatar-upload-btn">Upload photo</button>
+              <button type="button" class="link-btn" id="avatar-remove-btn">Remove</button>
+              <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+            </div>
+          </div>
+          <p class="settings-error" id="avatar-error"></p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Name color</h3>
+          <p class="settings-hint">Shown next to your name in Global Chat.</p>
+          <div class="color-row">
+            <input type="color" id="color-input" value="#2F3B26" />
+            <span class="color-preview" id="color-preview-name">Your name in chat</span>
+            <button type="button" class="link-btn" id="color-reset-btn">Reset</button>
+          </div>
+          <p class="settings-error" id="color-error"></p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Username</h3>
+          <form class="settings-form" id="username-form">
+            <input id="username-input" placeholder="New username" autocomplete="off" maxlength="20" />
+            <button class="btn" type="submit">Save</button>
+          </form>
+          <p class="settings-error" id="username-error"></p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Password</h3>
+          <form class="settings-form settings-form-stacked" id="password-form">
+            <input id="current-password-input" type="password" placeholder="Current password" autocomplete="current-password" />
+            <input id="new-password-input" type="password" placeholder="New password" autocomplete="new-password" />
+            <input id="confirm-password-input" type="password" placeholder="Confirm new password" autocomplete="new-password" />
+            <button class="btn" type="submit">Change password</button>
+          </form>
+          <p class="settings-error" id="password-error"></p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Muted &amp; blocked</h3>
+          <div id="relations-list" class="relations-list">
+            <p class="settings-hint">Nobody muted or blocked yet.</p>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <button class="btn" id="logout-btn">Log out</button>
+        </section>
+      </div>
+    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>

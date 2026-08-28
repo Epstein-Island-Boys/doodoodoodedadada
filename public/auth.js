@@ -17,6 +17,25 @@ async function apiGet(url) {
   return res.json();
 }
 
+async function apiPatch(url, body) {
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  return data;
+}
+
+async function apiDelete(url) {
+  const res = await fetch(url, { method: "DELETE", credentials: "same-origin" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  return data;
+}
+
 // Pages that only make sense once you've found the hidden door redirect
 // back to the decoy if the unlock cookie is missing.
 function requireUnlocked() {
