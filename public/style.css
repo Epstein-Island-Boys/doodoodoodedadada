@@ -474,6 +474,93 @@ h1 {
   margin: 0;
 }
 
+.notif-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 18px;
+  background: rgba(140, 163, 122, 0.15);
+  border-bottom: 1px solid var(--line);
+  font-size: 0.78rem;
+  color: var(--ink);
+}
+
+.notif-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.notif-banner-actions button {
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--forest);
+}
+
+#notif-enable-btn {
+  background: var(--forest);
+  color: var(--paper);
+}
+
+#notif-dismiss-btn {
+  background: transparent;
+  color: var(--bark);
+  border-color: transparent;
+  padding: 5px 7px;
+}
+
+.global-chat-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 18px;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+
+.global-chat-item:hover,
+.global-chat-item.active {
+  background: rgba(47, 59, 38, 0.06);
+}
+
+.global-chat-icon {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--sage);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.05rem;
+}
+
+.global-chat-item .conv-name {
+  font-weight: 500;
+  color: var(--forest);
+  font-size: 0.95rem;
+}
+
+.global-chat-item .conv-preview {
+  font-size: 0.82rem;
+  color: var(--ink);
+  opacity: 0.65;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
 .new-message {
   display: flex;
   gap: 8px;
@@ -515,15 +602,9 @@ h1 {
 }
 
 .conversation-item {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 12px 18px;
-  border: none;
+  display: flex;
+  align-items: stretch;
   border-bottom: 1px solid var(--line);
-  background: transparent;
-  cursor: pointer;
-  font-family: var(--sans);
 }
 
 .conversation-item:hover,
@@ -531,10 +612,57 @@ h1 {
   background: rgba(47, 59, 38, 0.06);
 }
 
+.conv-open {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  padding: 12px 6px 12px 18px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--sans);
+}
+
+.conv-menu-btn {
+  flex-shrink: 0;
+  width: 34px;
+  border: none;
+  background: transparent;
+  color: var(--bark);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.conv-menu-btn:hover {
+  background: rgba(140, 163, 122, 0.25);
+}
+
 .conversation-item .conv-name {
   font-weight: 500;
   color: var(--forest);
   font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.relation-badge {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bark);
+  background: rgba(140, 163, 122, 0.2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.relation-badge-blocked {
+  color: #9A3324;
+  background: rgba(154, 51, 36, 0.12);
 }
 
 .conversation-item .conv-preview {
@@ -552,6 +680,40 @@ h1 {
   font-size: 0.85rem;
   color: var(--bark);
   opacity: 0.8;
+}
+
+/* Shared mute/block popup, repositioned via JS next to whichever conv-menu-btn
+   was clicked. Same is-hidden pattern as the emoji panel and drop hint. */
+.context-menu {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(30, 35, 23, 0.18);
+  overflow: hidden;
+  z-index: 30;
+}
+
+.context-menu button {
+  text-align: left;
+  padding: 10px 14px;
+  border: none;
+  background: none;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.context-menu button:hover {
+  background: rgba(140, 163, 122, 0.15);
+}
+
+.context-menu button:not(:last-child) {
+  border-bottom: 1px solid var(--line);
 }
 
 .chat-main {
@@ -650,24 +812,48 @@ h1 {
   pointer-events: none;
 }
 
-.bubble {
+.bubble-group {
+  display: flex;
+  flex-direction: column;
   max-width: 60%;
+}
+
+.bubble-group.theirs { align-self: flex-start; align-items: flex-start; }
+.bubble-group.mine { align-self: flex-end; align-items: flex-end; }
+
+.bubble-sender {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
+  color: var(--bark);
+  margin: 0 2px 3px;
+}
+
+.seen-indicator {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.03em;
+  color: var(--bark);
+  opacity: 0.7;
+  margin: 3px 2px 0;
+}
+
+.bubble {
   padding: 10px 14px;
   border-radius: 14px;
   font-size: 0.92rem;
   line-height: 1.45;
   word-wrap: break-word;
+  max-width: 100%;
 }
 
 .bubble.theirs {
-  align-self: flex-start;
   background: var(--bubble-theirs);
   color: var(--ink);
   border-bottom-left-radius: 4px;
 }
 
 .bubble.mine {
-  align-self: flex-end;
   background: var(--forest);
   color: var(--paper);
   border-bottom-right-radius: 4px;
@@ -675,7 +861,6 @@ h1 {
 
 .bubble.bubble-image {
   padding: 6px;
-  max-width: 55%;
 }
 
 .bubble-image img {

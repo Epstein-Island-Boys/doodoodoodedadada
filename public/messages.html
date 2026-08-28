@@ -27,6 +27,22 @@
         <button class="theme-toggle" data-theme-toggle></button>
       </div>
 
+      <div class="notif-banner is-hidden" id="notif-banner">
+        <span>Get notified when someone messages you.</span>
+        <div class="notif-banner-actions">
+          <button type="button" id="notif-enable-btn">Enable</button>
+          <button type="button" id="notif-dismiss-btn" aria-label="Dismiss">✕</button>
+        </div>
+      </div>
+
+      <button class="global-chat-item" id="global-chat-btn">
+        <span class="global-chat-icon" aria-hidden="true">🌐</span>
+        <div>
+          <div class="conv-name">Global Chat</div>
+          <div class="conv-preview" id="global-chat-preview">Say hello to everyone.</div>
+        </div>
+      </button>
+
       <form class="new-message" id="new-message-form">
         <input id="new-username" placeholder="Message a username…" autocomplete="off" />
         <button type="submit">Start</button>
@@ -72,6 +88,11 @@
         <p class="composer-error" id="composer-error"></p>
       </div>
     </main>
+  </div>
+
+  <div class="context-menu is-hidden" id="conv-menu">
+    <button type="button" id="conv-menu-mute">Mute</button>
+    <button type="button" id="conv-menu-block">Block</button>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>

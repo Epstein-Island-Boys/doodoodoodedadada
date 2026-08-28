@@ -63,7 +63,40 @@ async function initDb() {
   if (!messageColumns.includes("type")) {
     await db.execute("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'");
   }
+  // Read receipts: NULL until the recipient has opened/seen the message.
+  if (!messageColumns.includes("read_at")) {
+    await db.execute("ALTER TABLE messages ADD COLUMN read_at TEXT");
+  }
   await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages (sender_id, recipient_id)");
+
+  // One shared room every user can post to and see. Kept as its own table
+  // (rather than reusing `messages` with a nullable recipient) since a
+  // broadcast message has no single recipient and the existing `messages`
+  // table's recipient_id is NOT NULL by design.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS global_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      body TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'text',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Mutes/blocks: one row per (owner, target) pair. A user can only have one
+  // relation toward another at a time — setting 'blocked' over an existing
+  // 'muted' row (or vice versa) replaces it, which matches how most chat
+  // apps treat block as a stronger version of mute rather than a separate
+  // simultaneous state.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS user_relations (
+      owner_id INTEGER NOT NULL REFERENCES users(id),
+      target_id INTEGER NOT NULL REFERENCES users(id),
+      relation TEXT NOT NULL CHECK (relation IN ('muted', 'blocked')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (owner_id, target_id)
+    )
+  `);
 
   // Images now live in Turso too (as blobs), instead of the local /uploads
   // folder, which had the same disappears-on-redeploy problem as the old
@@ -230,7 +263,65 @@ app.get("/api/users/:username", requireAuth, async (req, res) => {
   res.json({ username: user.username });
 });
 
-// ---- Conversations ----------------------------------------------------------
+// ---- Mute / block relations --------------------------------------------------
+// Small helper used both by the /api/relations routes and by the send-message
+// route (to check whether the recipient has blocked the sender).
+async function getRelation(ownerId, targetId) {
+  const result = await db.execute({
+    sql: "SELECT relation FROM user_relations WHERE owner_id = ? AND target_id = ?",
+    args: [ownerId, targetId],
+  });
+  return result.rows[0]?.relation || null;
+}
+
+app.get("/api/relations", requireAuth, async (req, res) => {
+  const result = await db.execute({
+    sql: `SELECT u.username, r.relation
+          FROM user_relations r
+          JOIN users u ON u.id = r.target_id
+          WHERE r.owner_id = ?`,
+    args: [req.session.userId],
+  });
+  const muted = result.rows.filter((r) => r.relation === "muted").map((r) => r.username);
+  const blocked = result.rows.filter((r) => r.relation === "blocked").map((r) => r.username);
+  res.json({ muted, blocked });
+});
+
+app.post("/api/relations", requireAuth, async (req, res) => {
+  const { target, relation } = req.body || {};
+  if (typeof target !== "string") {
+    return res.status(400).json({ error: "A target username is required." });
+  }
+  if (relation !== null && relation !== "muted" && relation !== "blocked") {
+    return res.status(400).json({ error: "relation must be 'muted', 'blocked', or null." });
+  }
+  if (target === req.session.username) {
+    return res.status(400).json({ error: "You can't mute or block yourself." });
+  }
+
+  const targetResult = await db.execute({
+    sql: "SELECT id FROM users WHERE username = ?",
+    args: [target],
+  });
+  const targetUser = targetResult.rows[0];
+  if (!targetUser) return res.status(404).json({ error: "No user with that username." });
+
+  if (relation === null) {
+    await db.execute({
+      sql: "DELETE FROM user_relations WHERE owner_id = ? AND target_id = ?",
+      args: [req.session.userId, targetUser.id],
+    });
+  } else {
+    await db.execute({
+      sql: `INSERT INTO user_relations (owner_id, target_id, relation) VALUES (?, ?, ?)
+            ON CONFLICT (owner_id, target_id) DO UPDATE SET relation = excluded.relation`,
+      args: [req.session.userId, targetUser.id, relation],
+    });
+  }
+  res.json({ ok: true, target, relation });
+});
+
+
 // One row per person you've exchanged messages with, most recent first.
 app.get("/api/conversations", requireAuth, async (req, res) => {
   const myId = req.session.userId;
@@ -269,7 +360,7 @@ app.get("/api/messages/:username", requireAuth, async (req, res) => {
   if (!other) return res.status(404).json({ error: "No user with that username." });
 
   const result = await db.execute({
-    sql: `SELECT sender_id, body, type, created_at FROM messages
+    sql: `SELECT sender_id, body, type, created_at, read_at FROM messages
        WHERE (sender_id = ? AND recipient_id = ?)
           OR (sender_id = ? AND recipient_id = ?)
        ORDER BY created_at ASC`,
@@ -281,8 +372,34 @@ app.get("/api/messages/:username", requireAuth, async (req, res) => {
     type: r.type,
     created_at: r.created_at,
     mine: r.sender_id === myId,
+    read: r.read_at != null,
   }));
   res.json({ messages });
+});
+
+// ---- Mark all of someone's messages to me as read ----------------------------
+app.post("/api/messages/:username/read", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const otherResult = await db.execute({
+    sql: "SELECT id, username FROM users WHERE username = ?",
+    args: [req.params.username],
+  });
+  const other = otherResult.rows[0];
+  if (!other) return res.status(404).json({ error: "No user with that username." });
+
+  const updated = await db.execute({
+    sql: `UPDATE messages SET read_at = datetime('now')
+          WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL`,
+    args: [other.id, myId],
+  });
+
+  // Let the sender know (live) that their messages in this thread were seen.
+  if (updated.rowsAffected > 0) {
+    for (const socketId of onlineSockets.get(other.id) || []) {
+      io.to(socketId).emit("message-read", { by: req.session.username });
+    }
+  }
+  res.json({ ok: true });
 });
 
 // ---- Send a message ----------------------------------------------------------
@@ -306,6 +423,11 @@ app.post("/api/messages", requireAuth, async (req, res) => {
   });
   const recipient = recipientResult.rows[0];
   if (!recipient) return res.status(404).json({ error: "No user with that username." });
+
+  const theirRelationToMe = await getRelation(recipient.id, myId);
+  if (theirRelationToMe === "blocked") {
+    return res.status(403).json({ error: "You can't message this user." });
+  }
 
   const trimmedBody = body.trim();
   const info = await db.execute({
@@ -357,6 +479,11 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
       const recipient = recipientResult.rows[0];
       if (!recipient) return res.status(404).json({ error: "No user with that username." });
 
+      const theirRelationToMe = await getRelation(recipient.id, myId);
+      if (theirRelationToMe === "blocked") {
+        return res.status(403).json({ error: "You can't message this user." });
+      }
+
       const imageInfo = await db.execute({
         sql: "INSERT INTO images (mime_type, data, uploaded_by) VALUES (?, ?, ?)",
         args: [req.file.mimetype, req.file.buffer, myId],
@@ -384,6 +511,106 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
         io.to(socketId).emit("message", payload);
       }
 
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
+// ---- Global chat --------------------------------------------------------------
+// One shared room everyone can post to and read. No block/mute filtering here
+// on purpose — those only govern DMs and DM notifications; the global room is
+// a public space everyone in it can see in full.
+const GLOBAL_HISTORY_LIMIT = 200;
+
+app.get("/api/global/messages", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const result = await db.execute({
+    sql: `SELECT u.username AS sender, g.body, g.type, g.created_at
+          FROM global_messages g
+          JOIN users u ON u.id = g.sender_id
+          ORDER BY g.created_at ASC, g.id ASC
+          LIMIT ?`,
+    args: [GLOBAL_HISTORY_LIMIT],
+  });
+  const messages = result.rows.map((r) => ({
+    sender: r.sender,
+    body: r.body,
+    type: r.type,
+    created_at: r.created_at,
+    mine: r.sender === req.session.username,
+  }));
+  res.json({ messages });
+});
+
+function broadcastGlobal(payload, exceptUserId) {
+  for (const [uid, socketIds] of onlineSockets.entries()) {
+    if (uid === exceptUserId) continue;
+    for (const socketId of socketIds) io.to(socketId).emit("global-message", payload);
+  }
+}
+
+app.post("/api/global/messages", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const { body } = req.body || {};
+  if (typeof body !== "string" || !body.trim()) {
+    return res.status(400).json({ error: "A message body is required." });
+  }
+  if (body.length > 2000) {
+    return res.status(400).json({ error: "Messages are limited to 2000 characters." });
+  }
+
+  const trimmedBody = body.trim();
+  const info = await db.execute({
+    sql: "INSERT INTO global_messages (sender_id, body) VALUES (?, ?)",
+    args: [myId, trimmedBody],
+  });
+  const createdResult = await db.execute({
+    sql: "SELECT created_at FROM global_messages WHERE id = ?",
+    args: [insertedId(info)],
+  });
+
+  const payload = {
+    sender: req.session.username,
+    body: trimmedBody,
+    type: "text",
+    created_at: createdResult.rows[0].created_at,
+  };
+  broadcastGlobal(payload, myId);
+  res.json({ ok: true, message: payload });
+});
+
+app.post("/api/global/messages/image", requireAuth, (req, res) => {
+  upload.single("image")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No image provided." });
+
+    try {
+      const myId = req.session.userId;
+      const imageInfo = await db.execute({
+        sql: "INSERT INTO images (mime_type, data, uploaded_by) VALUES (?, ?, ?)",
+        args: [req.file.mimetype, req.file.buffer, myId],
+      });
+      const url = "/api/images/" + insertedId(imageInfo);
+
+      const info = await db.execute({
+        sql: "INSERT INTO global_messages (sender_id, body, type) VALUES (?, ?, 'image')",
+        args: [myId, url],
+      });
+      const createdResult = await db.execute({
+        sql: "SELECT created_at FROM global_messages WHERE id = ?",
+        args: [insertedId(info)],
+      });
+
+      const payload = {
+        sender: req.session.username,
+        body: url,
+        type: "image",
+        created_at: createdResult.rows[0].created_at,
+      };
+      broadcastGlobal(payload, myId);
       res.json({ ok: true, message: payload });
     } catch (e) {
       console.error(e);
