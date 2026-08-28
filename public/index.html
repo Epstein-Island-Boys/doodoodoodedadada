@@ -18,9 +18,15 @@
       <p class="eyebrow">FIELD NOTES · NO. 04</p>
       <h1>Anatomy of a Tree</h1>
       <p class="deck">A cross-section guide to what's underneath the bark.</p>
+      <nav class="toc" aria-label="Table of contents">
+        <a href="#trunk">The Trunk</a>
+        <a href="#leaf">The Leaf</a>
+        <a href="#roots">The Roots</a>
+        <a href="#rings">Reading the Rings</a>
+      </nav>
     </header>
 
-    <main class="content">
+    <main class="content" id="trunk">
       <article class="copy">
         <p>
           Cut any trunk straight across and you'll find the tree keeping a
@@ -77,8 +83,220 @@
       </figure>
     </main>
 
+    <section class="article-block" id="leaf">
+      <h2>The Leaf: Photosynthesis's Factory Floor</h2>
+      <div class="content content-reverse">
+        <article class="copy">
+          <p>
+            Slice a leaf the way you'd slice the trunk and the same principle
+            holds: every layer has a job. A waxy cuticle on top cuts down on
+            water loss. Beneath it, a tight row of upright <em>palisade</em>
+            cells does most of the actual light-catching, packed with
+            chloroplasts and stacked like books on a shelf to intercept as
+            much sun as possible.
+          </p>
+          <p>
+            Lower down, the <em>spongy mesophyll</em> is looser and full of
+            air pockets, built for gas exchange rather than light capture.
+            Carbon dioxide diffuses in and oxygen diffuses out through pores
+            called stomata, mostly on the underside of the leaf, each one
+            flanked by a pair of guard cells that open and close it in
+            response to light, humidity, and the tree's own water budget.
+          </p>
+          <p class="caption">
+            A single mature oak can carry 200,000 leaves and move several
+            hundred litres of water a day, most of it lost right back out
+            through these same stomata.
+          </p>
+        </article>
+
+        <figure class="diagram diagram-secondary" aria-label="Leaf cross-section diagram">
+          <svg viewBox="0 0 420 260" xmlns="http://www.w3.org/2000/svg">
+            <rect x="30" y="30" width="360" height="10" class="tissue tissue-cuticle" />
+            <rect x="30" y="40" width="360" height="14" class="tissue tissue-epidermis" />
+            <g class="tissue tissue-palisade">
+              <rect x="34" y="54"  width="18" height="46" />
+              <rect x="58" y="54"  width="18" height="46" />
+              <rect x="82" y="54"  width="18" height="46" />
+              <rect x="106" y="54" width="18" height="46" />
+              <rect x="130" y="54" width="18" height="46" />
+              <rect x="154" y="54" width="18" height="46" />
+              <rect x="178" y="54" width="18" height="46" />
+              <rect x="202" y="54" width="18" height="46" />
+              <rect x="226" y="54" width="18" height="46" />
+              <rect x="250" y="54" width="18" height="46" />
+              <rect x="274" y="54" width="18" height="46" />
+              <rect x="298" y="54" width="18" height="46" />
+              <rect x="322" y="54" width="18" height="46" />
+              <rect x="346" y="54" width="18" height="46" />
+              <rect x="370" y="54" width="14" height="46" />
+            </g>
+            <g class="tissue tissue-spongy">
+              <circle cx="55"  cy="130" r="16" />
+              <circle cx="95"  cy="140" r="14" />
+              <circle cx="135" cy="126" r="17" />
+              <circle cx="178" cy="142" r="15" />
+              <circle cx="220" cy="128" r="16" />
+              <circle cx="262" cy="140" r="14" />
+              <circle cx="303" cy="126" r="17" />
+              <circle cx="345" cy="140" r="15" />
+              <circle cx="380" cy="130" r="14" />
+            </g>
+            <rect x="30" y="170" width="360" height="14" class="tissue tissue-epidermis" />
+            <ellipse cx="130" cy="184" rx="9" ry="4" class="stoma" />
+            <ellipse cx="290" cy="184" rx="9" ry="4" class="stoma" />
+            <rect x="205" y="30" width="10" height="154" class="vein" />
+
+            <g class="leader">
+              <line x1="210" y1="20" x2="210" y2="30" />
+              <text x="140" y="16">Cuticle + upper epidermis</text>
+            </g>
+            <g class="leader">
+              <line x1="392" y1="77" x2="410" y2="77" />
+              <text x="256" y="215">Palisade mesophyll</text>
+            </g>
+            <g class="leader">
+              <line x1="392" y1="132" x2="410" y2="132" />
+              <text x="76" y="215">Spongy mesophyll</text>
+            </g>
+            <g class="leader">
+              <line x1="130" y1="188" x2="130" y2="205" />
+              <text x="95" y="222">Stoma</text>
+            </g>
+            <g class="leader">
+              <line x1="210" y1="30" x2="230" y2="30" />
+              <text x="234" y="45">Vein</text>
+            </g>
+          </svg>
+        </figure>
+      </div>
+    </section>
+
+    <section class="article-block" id="roots">
+      <h2>The Roots: A Mirror Underground</h2>
+      <div class="content">
+        <figure class="diagram diagram-secondary" aria-label="Root system diagram">
+          <svg viewBox="0 0 420 300" xmlns="http://www.w3.org/2000/svg">
+            <line x1="20" y1="40" x2="400" y2="40" class="soil-line" />
+            <text x="24" y="30" class="soil-label">soil surface</text>
+            <rect x="200" y="10" width="20" height="30" class="root-trunk" />
+            <path d="M210,40 C205,110 195,150 190,230" class="root-main" />
+            <path d="M210,60 C240,90 260,100 300,110" class="root-lateral" />
+            <path d="M210,90 C170,110 150,120 110,140" class="root-lateral" />
+            <path d="M205,130 C235,150 255,165 285,190" class="root-lateral" />
+            <path d="M200,150 C165,175 145,190 115,215" class="root-lateral" />
+            <path d="M195,190 C215,215 225,235 240,260" class="root-fine" />
+            <path d="M192,190 C170,220 160,240 150,265" class="root-fine" />
+            <path d="M300,110 C320,120 335,128 350,135" class="root-fine" />
+            <path d="M110,140 C90,148 75,153 60,158" class="root-fine" />
+
+            <g class="leader">
+              <line x1="220" y1="20" x2="250" y2="15" />
+              <text x="254" y="19">Root collar</text>
+            </g>
+            <g class="leader">
+              <line x1="300" y1="110" x2="330" y2="95" />
+              <text x="334" y="99">Lateral roots</text>
+            </g>
+            <g class="leader">
+              <line x1="190" y1="230" x2="190" y2="255" />
+              <text x="150" y="272">Fine "feeder" roots</text>
+            </g>
+          </svg>
+        </figure>
+
+        <article class="copy">
+          <p>
+            Roughly speaking, a tree's root system spreads out roughly as
+            wide as its crown does, sometimes wider. A young taproot drives
+            straight down for anchorage and access to deep water, then gives
+            way over the years to a shallower, wide-reaching network of
+            lateral roots — most of a mature tree's absorbing roots live in
+            the top 30-60 cm of soil, right where water, oxygen, and nutrients
+            are easiest to reach.
+          </p>
+          <p>
+            At the very tips of the finest roots, root hairs — single-cell
+            extensions barely visible without a lens — do the actual work of
+            pulling in water and dissolved minerals. Many species also lean
+            on mycorrhizal fungi threaded through the soil around those tips,
+            trading root-made sugars for a vastly larger effective surface
+            area to draw from.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="article-block" id="rings">
+      <h2>Reading the Rings: An Introduction to Dendrochronology</h2>
+      <div class="content content-reverse">
+        <article class="copy">
+          <p>
+            Every ring you counted in the cross-section above records one
+            growing season: a pale band of large, fast-grown earlywood laid
+            down in spring, followed by a darker, denser band of latewood as
+            growth slows toward autumn. Line the two up and you get one
+            visible ring per year — which is what makes a trunk countable in
+            the first place.
+          </p>
+          <p>
+            Ring <em>width</em> carries information too. Wide rings usually
+            mean a good year — plenty of rain, a long growing season, no
+            competition crowding out the light. Narrow rings cluster around
+            drought years, hard frosts, insect outbreaks, or the years right
+            after a neighboring tree fell and this one had to redirect its
+            energy toward the wound before it could put on new wood.
+          </p>
+          <p class="caption">
+            Dendrochronologists cross-match these wide/narrow patterns
+            between living trees and old timber to build ring-width
+            chronologies stretching back thousands of years.
+          </p>
+        </article>
+
+        <figure class="diagram diagram-secondary" aria-label="Tree ring width chart by year">
+          <svg viewBox="0 0 420 260" xmlns="http://www.w3.org/2000/svg">
+            <line x1="40" y1="210" x2="400" y2="210" class="axis-line" />
+            <g class="ring-bar">
+              <rect x="46"  y="150" width="20" height="60" />
+              <rect x="76"  y="130" width="20" height="80" />
+              <rect x="106" y="170" width="20" height="40" />
+              <rect x="136" y="90"  width="20" height="120" />
+              <rect x="166" y="185" width="20" height="25" class="ring-bar-narrow" />
+              <rect x="196" y="175" width="20" height="35" class="ring-bar-narrow" />
+              <rect x="226" y="110" width="20" height="100" />
+              <rect x="256" y="140" width="20" height="70" />
+              <rect x="286" y="60"  width="20" height="150" />
+              <rect x="316" y="125" width="20" height="85" />
+              <rect x="346" y="160" width="20" height="50" />
+              <rect x="376" y="100" width="20" height="110" />
+            </g>
+            <g class="leader">
+              <line x1="176" y1="182" x2="176" y2="150" />
+              <text x="130" y="140">Drought years</text>
+            </g>
+            <text x="46" y="226" class="axis-label">1962</text>
+            <text x="366" y="226" class="axis-label">1973</text>
+            <text x="20" y="150" class="axis-label axis-label-y">wider</text>
+            <text x="20" y="205" class="axis-label axis-label-y">narrower</text>
+          </svg>
+        </figure>
+      </div>
+    </section>
+
     <footer class="masthead-footer">
       <p>Field Notes is a small periodical about ordinary trees.</p>
+      <p class="colophon">
+        Issue No. 04, <em>Anatomy of a Tree</em>. Illustrations after
+        standard botanical cross-section references. Specimen data collected
+        at the field station; ring-width figures are illustrative, not a
+        published chronology. Corrections to the editor, as always.
+      </p>
+      <p class="further-reading">
+        Further reading — <em>The Hidden Life of Trees</em>, P. Wohlleben ·
+        <em>Tree: A Life Story</em>, D. Suzuki &amp; W. Grady ·
+        International Tree-Ring Data Bank (ITRDB)
+      </p>
     </footer>
   </div>
 

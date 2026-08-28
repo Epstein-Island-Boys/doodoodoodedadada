@@ -43,7 +43,7 @@
         Pick a conversation, or type a username to start one.
       </div>
 
-      <div id="thread-view" hidden>
+      <div id="thread-view" class="is-hidden">
         <div class="chat-main-header">
           <div>
             <button class="back-link" id="back-link">&larr; Back</button>
@@ -53,7 +53,7 @@
         </div>
         <div class="thread-wrap" id="thread-wrap">
           <div class="thread" id="thread"></div>
-          <div class="drop-hint" id="drop-hint" hidden>Drop image to send</div>
+          <div class="drop-hint is-hidden" id="drop-hint">Drop image to send</div>
         </div>
         <form class="composer" id="composer">
           <div class="composer-tools">
@@ -64,7 +64,7 @@
           <input id="composer-input" placeholder="Write a message…" autocomplete="off" maxlength="2000" />
           <button type="submit">Send</button>
 
-          <div class="emoji-panel" id="emoji-panel" hidden>
+          <div class="emoji-panel is-hidden" id="emoji-panel">
             <input type="text" class="emoji-search" id="emoji-search" placeholder="Search emoji…" autocomplete="off" />
             <div class="emoji-grid" id="emoji-grid"></div>
           </div>

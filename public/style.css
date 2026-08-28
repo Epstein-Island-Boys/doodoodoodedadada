@@ -184,6 +184,125 @@ h1 {
   .content { grid-template-columns: 1fr; }
 }
 
+/* ---------- Decoy page: table of contents ---------- */
+
+.toc {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin-top: 20px;
+}
+
+.toc a {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--bark);
+  text-decoration: none;
+  opacity: 0.85;
+  border-bottom: 1px solid transparent;
+}
+
+.toc a:hover {
+  border-bottom-color: var(--bark);
+}
+
+/* ---------- Decoy page: additional article sections ---------- */
+
+.article-block {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 8px 24px 8px;
+  border-top: 1px solid var(--line);
+}
+
+.article-block h2 {
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 1.6rem;
+  color: var(--forest);
+  text-align: center;
+  margin: 40px 0 8px;
+}
+
+.content-reverse .copy { order: 2; }
+.content-reverse .diagram { order: 1; }
+
+@media (max-width: 720px) {
+  .content-reverse .copy,
+  .content-reverse .diagram { order: initial; }
+}
+
+/* Leaf cross-section diagram */
+.tissue-cuticle { fill: var(--bark); opacity: 0.5; }
+.tissue-epidermis { fill: #E7E9D8; stroke: var(--sage); stroke-width: 1; }
+.tissue-palisade rect {
+  fill: #DDE6CC;
+  stroke: var(--sage);
+  stroke-width: 1;
+}
+.tissue-spongy circle {
+  fill: #E3EAD6;
+  stroke: var(--sage);
+  stroke-width: 1;
+  opacity: 0.9;
+}
+.stoma { fill: var(--heartwood); opacity: 0.85; }
+.vein { fill: var(--bark); opacity: 0.6; }
+
+/* Root system diagram */
+.soil-line { stroke: var(--ink); opacity: 0.3; stroke-width: 1; stroke-dasharray: 3 4; }
+.soil-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  fill: var(--bark);
+  opacity: 0.8;
+}
+.root-trunk { fill: var(--bark); opacity: 0.6; }
+.root-main {
+  fill: none;
+  stroke: var(--bark);
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+.root-lateral {
+  fill: none;
+  stroke: var(--bark);
+  stroke-width: 3;
+  opacity: 0.75;
+  stroke-linecap: round;
+}
+.root-fine {
+  fill: none;
+  stroke: var(--sage);
+  stroke-width: 1.5;
+  opacity: 0.8;
+  stroke-linecap: round;
+}
+
+/* Ring-width-by-year chart */
+.axis-line { stroke: var(--ink); opacity: 0.3; stroke-width: 1; }
+.axis-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  fill: var(--bark);
+  opacity: 0.85;
+}
+.axis-label-y { text-anchor: end; }
+.ring-bar rect { fill: var(--sage); opacity: 0.75; }
+.ring-bar rect.ring-bar-narrow { fill: var(--heartwood); opacity: 0.8; }
+
+.masthead-footer .colophon,
+.masthead-footer .further-reading {
+  max-width: 620px;
+  margin: 10px auto 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  letter-spacing: 0.01em;
+}
+
 /* ---------- Secret site ---------- */
 
 #secret {
@@ -442,17 +561,20 @@ h1 {
   min-height: 0;
 }
 
-/* thread-view is toggled via the `hidden` attribute in JS. It needs
-   display:contents when shown (so its children act as direct flex items
-   of .chat-main), but that display value has to be overridden back to
-   none while [hidden] is set, or the whole panel — header, thread,
-   composer — renders permanently regardless of what JS does to it. */
-#thread-view {
-  display: contents;
+/* Single source of truth for "is this shown or not" across the whole chat
+   UI (thread-view, empty-state, drop-hint, emoji-panel). Using !important
+   here is intentional: this class's entire job is to hide something no
+   matter what other display value a more specific rule gives it, so it
+   can never again be silently overridden the way `hidden` was. */
+.is-hidden {
+  display: none !important;
 }
 
-#thread-view[hidden] {
-  display: none;
+/* thread-view flows as though its children were direct flex items of
+   .chat-main, so its header/thread/composer lay out normally in the
+   column. .is-hidden (above) takes priority over this when applied. */
+#thread-view {
+  display: contents;
 }
 
 .chat-main-header {
@@ -475,16 +597,26 @@ h1 {
   color: var(--bark);
 }
 
+/* Deliberately NOT flex:1 / full-height — this is just a quiet placeholder
+   near the top of the pane, not a giant hero block. It only ever shares
+   the pane with nothing else, since .is-hidden removes it entirely once a
+   thread is open. */
 .chat-empty-state {
-  flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: 10px;
   color: var(--bark);
-  opacity: 0.7;
-  font-size: 0.95rem;
-  padding: 24px;
+  opacity: 0.6;
+  font-size: 0.9rem;
+  padding: 48px 24px 24px;
   text-align: center;
+}
+
+.chat-empty-state svg {
+  width: 40px;
+  height: 40px;
+  opacity: 0.5;
 }
 
 .thread-wrap {
@@ -516,10 +648,6 @@ h1 {
   font-size: 0.95rem;
   font-weight: 500;
   pointer-events: none;
-}
-
-.drop-hint[hidden] {
-  display: none;
 }
 
 .bubble {
@@ -641,10 +769,6 @@ h1 {
   border-radius: 12px;
   box-shadow: 0 12px 32px rgba(30, 35, 23, 0.18);
   z-index: 20;
-}
-
-.emoji-panel[hidden] {
-  display: none;
 }
 
 .emoji-search {

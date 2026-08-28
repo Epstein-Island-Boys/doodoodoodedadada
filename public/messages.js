@@ -85,8 +85,8 @@ function bumpConversationPreview(username, body, type) {
 
 async function openThread(username) {
   activeUsername = username;
-  els.emptyState.hidden = true;
-  els.threadView.hidden = false;
+  els.emptyState.classList.add("is-hidden");
+  els.threadView.classList.remove("is-hidden");
   els.threadTitle.textContent = "@" + username;
   els.sidebar.classList.add("hide-on-mobile");
   els.main.classList.remove("hide-on-mobile");
@@ -197,7 +197,7 @@ function insertAtCursor(input, text) {
 }
 
 function openEmojiPanel() {
-  els.emojiPanel.hidden = false;
+  els.emojiPanel.classList.remove("is-hidden");
   els.emojiBtn.classList.add("active");
   els.emojiSearch.value = "";
   renderEmojiGrid("");
@@ -205,12 +205,12 @@ function openEmojiPanel() {
 }
 
 function closeEmojiPanel() {
-  els.emojiPanel.hidden = true;
+  els.emojiPanel.classList.add("is-hidden");
   els.emojiBtn.classList.remove("active");
 }
 
 els.emojiBtn.addEventListener("click", () => {
-  if (els.emojiPanel.hidden) openEmojiPanel();
+  if (els.emojiPanel.classList.contains("is-hidden")) openEmojiPanel();
   else closeEmojiPanel();
 });
 
@@ -226,13 +226,13 @@ els.emojiGrid.addEventListener("click", (e) => {
 });
 
 document.addEventListener("click", (e) => {
-  if (els.emojiPanel.hidden) return;
+  if (els.emojiPanel.classList.contains("is-hidden")) return;
   if (els.emojiPanel.contains(e.target) || els.emojiBtn.contains(e.target)) return;
   closeEmojiPanel();
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !els.emojiPanel.hidden) closeEmojiPanel();
+  if (e.key === "Escape" && !els.emojiPanel.classList.contains("is-hidden")) closeEmojiPanel();
 });
 
 // ---- Sending an image (button picker or drag-and-drop) ----------------------
@@ -301,7 +301,7 @@ let dragCounter = 0;
 els.threadWrap.addEventListener("dragenter", (e) => {
   e.preventDefault();
   dragCounter++;
-  if (activeUsername) els.dropHint.hidden = false;
+  if (activeUsername) els.dropHint.classList.remove("is-hidden");
 });
 
 els.threadWrap.addEventListener("dragover", (e) => {
@@ -310,13 +310,13 @@ els.threadWrap.addEventListener("dragover", (e) => {
 
 els.threadWrap.addEventListener("dragleave", () => {
   dragCounter = Math.max(0, dragCounter - 1);
-  if (dragCounter === 0) els.dropHint.hidden = true;
+  if (dragCounter === 0) els.dropHint.classList.add("is-hidden");
 });
 
 els.threadWrap.addEventListener("drop", (e) => {
   e.preventDefault();
   dragCounter = 0;
-  els.dropHint.hidden = true;
+  els.dropHint.classList.add("is-hidden");
   const file = e.dataTransfer.files && e.dataTransfer.files[0];
   if (file) sendImage(file);
 });
