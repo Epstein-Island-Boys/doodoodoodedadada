@@ -1,7 +1,9 @@
 // messages.js — the chat app: conversation list, the global room, opening a
-// thread, sending messages/images, the emoji picker, mute/block, read
-// receipts, desktop notifications, replies/edits/deletes, the settings
-// panel, and receiving things live over the socket.
+// thread, sending messages/images (including pasted images), the emoji
+// picker, mute/block, read receipts, desktop notifications, replies/edits/
+// unsend, hiding a chat from your inbox, typing indicators, presence dots,
+// the settings panel (avatar, name color, per-theme background, username,
+// password), and receiving all of the above live over the socket.
 
 let me = null;
 let activeConversation = null; // { type: "dm", username } | { type: "global" } | null
@@ -11,11 +13,13 @@ let globalMessages = null; // null until first loaded
 let globalPreview = "Say hello to everyone.";
 const mutedUsers = new Set();
 const blockedUsers = new Set();
-let replyingTo = null; // { scope: "dm"|"global", username, id, sender, previewText }
+let replyingTo = null; // { id, sender, type, body } | null
 let editingId = null; // id of the message currently being edited inline
-const partnerProfiles = new Map(); // username -> { avatarUrl, nameColor } — DM messages don't
-// carry sender info per-message (unlike global ones), since a DM thread only
-// ever has two participants, so we look theirs up once and cache it here.
+const partnerProfiles = new Map(); // username(lower) -> { avatarUrl, nameColor } — DM messages
+// don't carry sender info per-message (unlike global ones), since a DM
+// thread only ever has two participants, so we look theirs up once here.
+const activeUsernames = new Set(); // usernames currently looking at their tab (lowercased)
+const typingUsers = new Map(); // scope key -> Map(username -> timeoutId)
 
 const els = {
   whoAmI: document.getElementById("who-am-i"),
@@ -32,6 +36,7 @@ const els = {
   composer: document.getElementById("composer"),
   composerInput: document.getElementById("composer-input"),
   composerError: document.getElementById("composer-error"),
+  typingIndicator: document.getElementById("typing-indicator"),
   emojiBtn: document.getElementById("emoji-btn"),
   emojiPanel: document.getElementById("emoji-panel"),
   emojiSearch: document.getElementById("emoji-search"),
@@ -49,6 +54,7 @@ const els = {
   contextMenu: document.getElementById("conv-menu"),
   menuMuteBtn: document.getElementById("conv-menu-mute"),
   menuBlockBtn: document.getElementById("conv-menu-block"),
+  menuDeleteBtn: document.getElementById("conv-menu-delete"),
   replyBar: document.getElementById("reply-bar"),
   replyBarName: document.getElementById("reply-bar-name"),
   replyBarPreview: document.getElementById("reply-bar-preview"),
@@ -68,6 +74,11 @@ const els = {
   avatarRemoveBtn: document.getElementById("avatar-remove-btn"),
   avatarInput: document.getElementById("avatar-input"),
   avatarError: document.getElementById("avatar-error"),
+  lightBgInput: document.getElementById("light-bg-input"),
+  lightBgResetBtn: document.getElementById("light-bg-reset-btn"),
+  darkBgInput: document.getElementById("dark-bg-input"),
+  darkBgResetBtn: document.getElementById("dark-bg-reset-btn"),
+  themeError: document.getElementById("theme-error"),
   colorInput: document.getElementById("color-input"),
   colorPreviewName: document.getElementById("color-preview-name"),
   colorResetBtn: document.getElementById("color-reset-btn"),
@@ -85,6 +96,8 @@ const els = {
 };
 
 const DEFAULT_NAME_COLOR = "#2F3B26";
+const DEFAULT_LIGHT_BG = "#F3EFE1";
+const DEFAULT_DARK_BG = "#0F1226";
 
 function escapeHtml(str) {
   const div = document.createElement("div");
@@ -92,8 +105,7 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-function previewFor(body, type, deleted) {
-  if (deleted) return "Message deleted";
+function previewFor(body, type) {
   return type === "image" ? "📷 Photo" : body;
 }
 
@@ -109,17 +121,22 @@ function sameUsername(a, b) {
   return String(a || "").toLowerCase() === String(b || "").toLowerCase();
 }
 
-// ---- Avatars ------------------------------------------------------------------
+// ---- Avatars & presence --------------------------------------------------------
 function initialFor(username) {
   return (username || "?").charAt(0).toUpperCase();
 }
 
-function avatarHtml(username, avatarUrl, extraClass = "") {
+// Wraps the avatar in a positioning box so a presence dot can sit on its
+// corner. `showPresence` is only true for other people's avatars, never
+// your own — you always know whether you're looking at your own screen.
+function avatarHtml(username, avatarUrl, extraClass = "", showPresence = false) {
   const cls = `avatar ${extraClass}`.trim();
-  if (avatarUrl) {
-    return `<span class="${cls}"><img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(username)}'s avatar" /></span>`;
-  }
-  return `<span class="${cls}">${escapeHtml(initialFor(username))}</span>`;
+  const inner = avatarUrl
+    ? `<span class="${cls}"><img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(username)}'s avatar" /></span>`
+    : `<span class="${cls}">${escapeHtml(initialFor(username))}</span>`;
+  if (!showPresence) return inner;
+  const dot = activeUsernames.has(String(username).toLowerCase()) ? `<span class="presence-dot"></span>` : "";
+  return `<span class="avatar-wrap">${inner}${dot}</span>`;
 }
 
 // ---- Conversation list (DMs) -------------------------------------------------
@@ -162,13 +179,11 @@ function renderConversationList() {
         : mutedUsers.has(c.username)
         ? `<span class="relation-badge">Muted</span>`
         : "";
-      const previewText = hasUnread
-        ? `${unread} new message${unread === 1 ? "" : "s"}`
-        : previewFor(c.body, c.type, c.deleted);
+      const previewText = hasUnread ? `${unread} new message${unread === 1 ? "" : "s"}` : previewFor(c.body, c.type);
       return `
       <div class="conversation-item ${active} ${hasUnread ? "has-unread" : ""}">
         <button class="conv-open" data-username="${escapeHtml(c.username)}">
-          ${avatarHtml(c.username, c.avatarUrl)}
+          ${avatarHtml(c.username, c.avatarUrl, "", true)}
           <div class="conv-open-text">
             <div class="conv-name">${escapeHtml(c.username)} ${badge}</div>
             <div class="conv-preview">${escapeHtml(previewText)}</div>
@@ -196,14 +211,12 @@ function bumpConversationPreview(username, body, type, extra = {}) {
   if (existing) {
     existing.body = body;
     existing.type = type;
-    existing.deleted = !!extra.deleted;
     if (extra.incrementUnread) existing.unread = (existing.unread || 0) + 1;
   } else {
     conversations.unshift({
       username,
       body,
       type,
-      deleted: !!extra.deleted,
       created_at: new Date().toISOString(),
       nameColor: extra.nameColor || null,
       avatarUrl: extra.avatarUrl || null,
@@ -222,7 +235,7 @@ function clearUnread(username) {
   }
 }
 
-// ---- Mute / block context menu -----------------------------------------------
+// ---- Mute / block / delete-chat context menu ---------------------------------
 function openContextMenu(username, anchorEl) {
   els.contextMenu.dataset.target = username;
   els.menuMuteBtn.textContent = mutedUsers.has(username) ? "Unmute" : "Mute";
@@ -269,6 +282,28 @@ els.menuBlockBtn.addEventListener("click", async () => {
   await setRelation(target, blockedUsers.has(target) ? null : "blocked");
 });
 
+// Hides the chat from the inbox only — message history is untouched on the
+// server, and the chat comes back automatically the moment either person
+// sends a new message.
+els.menuDeleteBtn?.addEventListener("click", async () => {
+  const target = els.contextMenu.dataset.target;
+  closeContextMenu();
+  if (!target) return;
+  if (!window.confirm(`Delete your chat with ${target}? This just hides it from your inbox — it comes back if either of you messages again.`)) return;
+  try {
+    await apiDelete(`/api/conversations/${encodeURIComponent(target)}`);
+    conversations = conversations.filter((c) => !sameUsername(c.username, target));
+    renderConversationList();
+    if (isActiveDm(target)) {
+      activeConversation = null;
+      els.threadView.classList.add("is-hidden");
+      els.emptyState.classList.remove("is-hidden");
+    }
+  } catch (err) {
+    els.newError.textContent = err.message;
+  }
+});
+
 document.addEventListener("click", (e) => {
   if (els.contextMenu.classList.contains("is-hidden")) return;
   if (els.contextMenu.contains(e.target)) return;
@@ -288,6 +323,7 @@ async function openThread(username) {
   closeEmojiPanel();
   els.globalBtn.classList.remove("active");
   renderConversationList();
+  renderTypingIndicator();
 
   if (!threadCache.has(username)) {
     const data = await apiGet(`/api/messages/${encodeURIComponent(username)}`);
@@ -321,6 +357,7 @@ async function openGlobal() {
   closeEmojiPanel();
   els.globalBtn.classList.add("active");
   renderConversationList();
+  renderTypingIndicator();
 
   if (globalMessages === null) {
     const data = await apiGet("/api/global/messages");
@@ -335,12 +372,15 @@ els.globalBtn.addEventListener("click", openGlobal);
 // ---- Rendering ------------------------------------------------------------------
 function replySnippetText(reply) {
   if (!reply) return "";
-  if (reply.deleted) return "Message deleted";
+  if (reply.removed) return "Original message removed";
   return reply.type === "image" ? "📷 Photo" : reply.body;
 }
 
-function renderReplyQuote(reply, isGlobal) {
+function renderReplyQuote(reply) {
   if (!reply) return "";
+  if (reply.removed) {
+    return `<div class="reply-quote reply-quote-removed">Original message removed</div>`;
+  }
   const label = reply.sender === "me" ? "You" : reply.sender;
   return `<button type="button" class="reply-quote" data-jump-to="${reply.id}"><span class="reply-quote-name">${escapeHtml(label)}</span>${escapeHtml(replySnippetText(reply))}</button>`;
 }
@@ -356,31 +396,23 @@ function renderBubble(m, isGlobal) {
     }
   }
   const avatarOwner = isGlobal ? m.sender : activeConversation.username;
-  const avatar = !m.mine ? avatarHtml(avatarOwner, avatarUrl, "avatar-sm") : "";
+  const avatar = !m.mine ? avatarHtml(avatarOwner, avatarUrl, "avatar-sm", true) : "";
   const nameStyle = isGlobal && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
   const senderLabel =
     isGlobal && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
-  const seen =
-    !isGlobal && m.mine && !m.deleted
-      ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>`
-      : "";
-  const editedTag = m.edited && !m.deleted ? `<span class="edited-tag">(edited)</span>` : "";
-  const replyQuote = renderReplyQuote(m.reply, isGlobal);
+  const seen = !isGlobal && m.mine ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>` : "";
+  const editedTag = m.edited ? `<span class="edited-tag">(edited)</span>` : "";
+  const replyQuote = renderReplyQuote(m.reply);
 
-  const canManage = m.mine && !m.deleted;
-  let actions = "";
-  if (!m.deleted) {
-    actions = `<div class="bubble-actions">
-        <button type="button" class="bubble-action-btn" data-action="reply" title="Reply">↩</button>
-        ${canManage && m.type === "text" ? `<button type="button" class="bubble-action-btn" data-action="edit" title="Edit">✎</button>` : ""}
-        ${canManage ? `<button type="button" class="bubble-action-btn" data-action="delete" title="Delete">🗑</button>` : ""}
-      </div>`;
-  }
+  const canManage = m.mine;
+  const actions = `<div class="bubble-actions">
+      <button type="button" class="bubble-action-btn" data-action="reply" title="Reply">↩</button>
+      ${canManage && m.type === "text" ? `<button type="button" class="bubble-action-btn" data-action="edit" title="Edit">✎</button>` : ""}
+      ${canManage ? `<button type="button" class="bubble-action-btn" data-action="delete" title="Unsend">🗑</button>` : ""}
+    </div>`;
 
   let bubbleInner;
-  if (m.deleted) {
-    bubbleInner = `<div class="bubble ${side} deleted">Message deleted</div>`;
-  } else if (m.type === "image") {
+  if (m.type === "image") {
     bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.body)}" alt="Image message" loading="lazy" /></div>`;
   } else {
     bubbleInner = `<div class="bubble ${side}">${replyQuote}${escapeHtml(m.body)}</div>`;
@@ -414,7 +446,6 @@ function appendMessage(username, body, mine, type = "text", extra = {}) {
     created_at: new Date().toISOString(),
     read: false,
     edited: false,
-    deleted: false,
     reply: extra.reply || null,
   });
   threadCache.set(username, list);
@@ -433,10 +464,9 @@ function appendGlobalMessage(sender, body, mine, type = "text", extra = {}) {
     type,
     created_at: new Date().toISOString(),
     edited: false,
-    deleted: false,
     reply: extra.reply || null,
   });
-  globalPreview = previewFor(body, type, false);
+  globalPreview = previewFor(body, type);
   els.globalPreview.textContent = mine ? `You: ${globalPreview}` : `${sender}: ${globalPreview}`;
   if (activeConversation && activeConversation.type === "global") renderThread();
 }
@@ -463,7 +493,7 @@ function replaceGlobalMessageBody(oldBody, newBody, id) {
   }
 }
 
-// ---- Reply / edit / delete ---------------------------------------------------
+// ---- Reply / edit / unsend ---------------------------------------------------
 function setReplyBar(reply) {
   replyingTo = reply;
   if (!reply) {
@@ -492,27 +522,42 @@ function findMessageById(id) {
   return list.find((m) => String(m.id) === String(id));
 }
 
+// Removes a message from whichever local list holds it, by id. Used both
+// for our own unsends and for the "message-deleted" events that arrive when
+// the *other* person unsends something in a thread we have cached.
+function removeMessageEverywhere(id) {
+  for (const [, list] of threadCache) {
+    const idx = list.findIndex((m) => String(m.id) === String(id));
+    if (idx !== -1) {
+      list.splice(idx, 1);
+      return true;
+    }
+  }
+  return false;
+}
+
+function removeGlobalMessage(id) {
+  if (!globalMessages) return false;
+  const idx = globalMessages.findIndex((m) => String(m.id) === String(id));
+  if (idx !== -1) {
+    globalMessages.splice(idx, 1);
+    return true;
+  }
+  return false;
+}
+
 async function deleteMessage(id) {
   const isGlobal = activeConversation && activeConversation.type === "global";
-  if (!window.confirm("Delete this message?")) return;
+  if (!window.confirm("Unsend this message? It will be removed for everyone.")) return;
   try {
     if (isGlobal) {
       await apiDelete(`/api/global/messages/${id}`);
-      const msg = findMessageById(id);
-      if (msg) {
-        msg.deleted = true;
-        msg.body = "";
-        renderThread();
-      }
+      removeGlobalMessage(id);
     } else {
       await apiDelete(`/api/messages/${id}`);
-      const msg = findMessageById(id);
-      if (msg) {
-        msg.deleted = true;
-        msg.body = "";
-        renderThread();
-      }
+      removeMessageEverywhere(id);
     }
+    renderThread();
   } catch (err) {
     els.composerError.textContent = err.message;
   }
@@ -520,7 +565,7 @@ async function deleteMessage(id) {
 
 function startEdit(id) {
   const msg = findMessageById(id);
-  if (!msg || msg.type !== "text" || msg.deleted) return;
+  if (!msg || msg.type !== "text") return;
   editingId = id;
   renderThread();
   const group = els.thread.querySelector(`.bubble-group[data-id="${id}"]`);
@@ -589,7 +634,6 @@ els.thread.addEventListener("click", (e) => {
         sender: msg.mine ? "me" : isGlobal ? msg.sender : activeConversation.username,
         type: msg.type,
         body: msg.body,
-        deleted: msg.deleted,
       });
       els.composerInput.focus();
     } else if (action === "edit") {
@@ -662,10 +706,9 @@ els.composer.addEventListener("submit", async (e) => {
   if (!body || !activeConversation) return;
   els.composerInput.value = "";
   closeEmojiPanel();
+  sendTypingPing(false);
   const reply = replyingTo;
-  const replyPayload = reply
-    ? { id: reply.id, body: reply.body, type: reply.type, deleted: reply.deleted, sender: reply.sender }
-    : null;
+  const replyPayload = reply ? { id: reply.id, body: reply.body, type: reply.type, sender: reply.sender } : null;
   cancelReply();
 
   if (activeConversation.type === "global") {
@@ -693,6 +736,82 @@ els.composer.addEventListener("submit", async (e) => {
     appendMessage(to, `Failed to send: ${err.message}`, false, "text");
   }
 });
+
+// ---- Typing indicator ---------------------------------------------------------
+// Sends a throttled "I'm typing" ping to whoever's on the other end, and
+// automatically expires it after a few seconds of silence so a dropped
+// connection or closed tab doesn't leave a stale "is typing…" behind.
+let socketRef = null;
+let lastTypingPingAt = 0;
+const TYPING_THROTTLE_MS = 2000;
+const TYPING_EXPIRE_MS = 4000;
+
+function sendTypingPing(active) {
+  if (!socketRef || !activeConversation) return;
+  const now = Date.now();
+  if (active && now - lastTypingPingAt < TYPING_THROTTLE_MS) return;
+  lastTypingPingAt = active ? now : 0;
+  if (activeConversation.type === "global") {
+    socketRef.emit("typing", { scope: "global", active });
+  } else {
+    socketRef.emit("typing", { scope: "dm", to: activeConversation.username, active });
+  }
+}
+
+els.composerInput.addEventListener("input", () => {
+  sendTypingPing(els.composerInput.value.trim().length > 0);
+});
+
+function typingKeyFor(scope, from) {
+  return scope === "global" ? "global" : `dm:${from.toLowerCase()}`;
+}
+
+function noteTyping(scope, from, active) {
+  // Only worth showing if we're actually looking at that conversation.
+  const isGlobal = scope === "global";
+  const relevant = isGlobal
+    ? activeConversation && activeConversation.type === "global"
+    : isActiveDm(from);
+
+  const key = typingKeyFor(scope, from);
+  if (!typingUsers.has(key)) typingUsers.set(key, new Map());
+  const bucket = typingUsers.get(key);
+
+  if (bucket.has(from)) {
+    clearTimeout(bucket.get(from));
+    bucket.delete(from);
+  }
+
+  if (active) {
+    const timeoutId = setTimeout(() => {
+      bucket.delete(from);
+      if (relevant) renderTypingIndicator();
+    }, TYPING_EXPIRE_MS);
+    bucket.set(from, timeoutId);
+  }
+
+  if (relevant) renderTypingIndicator();
+}
+
+function renderTypingIndicator() {
+  if (!els.typingIndicator) return;
+  const isGlobal = activeConversation && activeConversation.type === "global";
+  const key = isGlobal ? "global" : activeConversation ? typingKeyFor("dm", activeConversation.username) : null;
+  const bucket = key ? typingUsers.get(key) : null;
+  const names = bucket ? [...bucket.keys()] : [];
+
+  if (names.length === 0) {
+    els.typingIndicator.textContent = "";
+    els.typingIndicator.classList.add("is-hidden");
+    return;
+  }
+  let text;
+  if (names.length === 1) text = `${names[0]} is typing…`;
+  else if (names.length === 2) text = `${names[0]} and ${names[1]} are typing…`;
+  else text = `${names.length} people are typing…`;
+  els.typingIndicator.textContent = text;
+  els.typingIndicator.classList.remove("is-hidden");
+}
 
 // ---- Emoji picker -----------------------------------------------------------
 function renderEmojiGrid(query) {
@@ -761,7 +880,7 @@ document.addEventListener("keydown", (e) => {
   if (replyingTo) cancelReply();
 });
 
-// ---- Sending an image (button picker or drag-and-drop) ----------------------
+// ---- Sending an image (button picker, drag-and-drop, or paste) --------------
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
@@ -829,6 +948,23 @@ els.imageInput.addEventListener("change", () => {
   if (file) sendImage(file);
 });
 
+// Pasting an image (e.g. "Copy image" from a browser, or a screenshot) into
+// the composer sends it the same way a picked or dropped file would.
+els.composerInput.addEventListener("paste", (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.kind === "file" && item.type && item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) {
+        e.preventDefault();
+        sendImage(file);
+      }
+      break;
+    }
+  }
+});
+
 // Drag-and-drop onto the open thread. Uses an enter/leave counter since
 // dragenter/dragleave fire repeatedly as the pointer crosses child elements.
 let dragCounter = 0;
@@ -879,6 +1015,33 @@ function applyMeToSettingsUI() {
   els.colorInput.value = me.nameColor || DEFAULT_NAME_COLOR;
   els.colorPreviewName.style.color = me.nameColor || "var(--forest)";
   els.colorPreviewName.textContent = me.username;
+
+  if (els.lightBgInput) els.lightBgInput.value = me.themeLightBg || DEFAULT_LIGHT_BG;
+  if (els.darkBgInput) els.darkBgInput.value = me.themeDarkBg || DEFAULT_DARK_BG;
+}
+
+// Applies the person's custom background for whichever theme is active
+// right now. Called on boot and whenever the theme is toggled or a custom
+// color is saved.
+function applyCustomBackground() {
+  const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+  const color = isDark ? me?.themeDarkBg : me?.themeLightBg;
+  if (color) {
+    document.documentElement.style.setProperty("--paper", color);
+  } else {
+    document.documentElement.style.removeProperty("--paper");
+  }
+}
+
+// theme.js defines a global setTheme() that the dark-mode toggle button
+// calls. Wrapping it lets us reapply the person's custom background right
+// after the theme actually switches, without duplicating theme.js's logic.
+if (typeof window.setTheme === "function") {
+  const originalSetTheme = window.setTheme;
+  window.setTheme = function (theme) {
+    originalSetTheme(theme);
+    applyCustomBackground();
+  };
 }
 
 function renderRelationsList() {
@@ -915,6 +1078,7 @@ function openSettings() {
   renderRelationsList();
   els.avatarError.textContent = "";
   els.colorError.textContent = "";
+  if (els.themeError) els.themeError.textContent = "";
   els.usernameError.textContent = "";
   els.passwordError.textContent = "";
   els.settingsOverlay.classList.remove("is-hidden");
@@ -983,6 +1147,25 @@ async function saveColor(color) {
 
 els.colorInput.addEventListener("change", () => saveColor(els.colorInput.value));
 els.colorResetBtn.addEventListener("click", () => saveColor(null));
+
+async function saveThemeBg(field, color) {
+  if (!els.themeError) return;
+  els.themeError.textContent = "";
+  try {
+    const res = await apiPost("/api/account/theme", { field, color });
+    if (field === "light") me.themeLightBg = res.color;
+    else me.themeDarkBg = res.color;
+    applyMeToSettingsUI();
+    applyCustomBackground();
+  } catch (err) {
+    els.themeError.textContent = err.message;
+  }
+}
+
+els.lightBgInput?.addEventListener("change", () => saveThemeBg("light", els.lightBgInput.value));
+els.lightBgResetBtn?.addEventListener("click", () => saveThemeBg("light", null));
+els.darkBgInput?.addEventListener("change", () => saveThemeBg("dark", els.darkBgInput.value));
+els.darkBgResetBtn?.addEventListener("click", () => saveThemeBg("dark", null));
 
 els.usernameForm.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1066,6 +1249,20 @@ function notifyNewMessage(from, body, type) {
   };
 }
 
+// ---- Presence: tell the server whether this tab is actually being looked at --
+function isTabActive() {
+  return document.hasFocus() && document.visibilityState === "visible";
+}
+
+function reportFocusState() {
+  if (!socketRef) return;
+  socketRef.emit("focus-state", { focused: isTabActive() });
+}
+
+window.addEventListener("focus", reportFocusState);
+window.addEventListener("blur", reportFocusState);
+document.addEventListener("visibilitychange", reportFocusState);
+
 // ---- Boot --------------------------------------------------------------------
 (async () => {
   me = await apiGet("/api/me");
@@ -1074,6 +1271,7 @@ function notifyNewMessage(from, body, type) {
     return;
   }
   els.whoAmI.textContent = "@" + me.username;
+  applyCustomBackground();
 
   updateNotifBanner();
 
@@ -1083,7 +1281,17 @@ function notifyNewMessage(from, body, type) {
 
   await loadConversations();
 
+  try {
+    const presence = await apiGet("/api/presence");
+    (presence.active || []).forEach((u) => activeUsernames.add(u.toLowerCase()));
+    renderConversationList();
+  } catch {
+    // Non-critical — presence dots just won't show until the first live update.
+  }
+
   const socket = io({ withCredentials: true });
+  socketRef = socket;
+  socket.on("connect", reportFocusState);
 
   socket.on("message", ({ id, from, body, type, reply }) => {
     const active = isActiveDm(from) && document.hasFocus();
@@ -1091,6 +1299,7 @@ function notifyNewMessage(from, body, type) {
     bumpConversationPreview(from, body, type || "text", { incrementUnread: !active });
     notifyNewMessage(from, body, type || "text");
     ensurePartnerProfile(from);
+    noteTyping("dm", from, false);
     if (active) markRead(from);
   });
 
@@ -1107,19 +1316,14 @@ function notifyNewMessage(from, body, type) {
   });
 
   socket.on("message-deleted", ({ id }) => {
-    for (const [, list] of threadCache) {
-      const msg = list.find((m) => String(m.id) === String(id));
-      if (msg) {
-        msg.deleted = true;
-        msg.body = "";
-        break;
-      }
+    if (removeMessageEverywhere(id) && activeConversation && activeConversation.type === "dm") {
+      renderThread();
     }
-    if (activeConversation && activeConversation.type === "dm") renderThread();
   });
 
   socket.on("global-message", ({ id, sender, nameColor, avatarUrl, body, type, reply }) => {
     appendGlobalMessage(sender, body, false, type || "text", { id, nameColor, avatarUrl, reply });
+    noteTyping("global", sender, false);
   });
 
   socket.on("global-message-edited", ({ id, body }) => {
@@ -1132,11 +1336,8 @@ function notifyNewMessage(from, body, type) {
   });
 
   socket.on("global-message-deleted", ({ id }) => {
-    const msg = globalMessages && globalMessages.find((m) => String(m.id) === String(id));
-    if (msg) {
-      msg.deleted = true;
-      msg.body = "";
-      if (activeConversation && activeConversation.type === "global") renderThread();
+    if (removeGlobalMessage(id) && activeConversation && activeConversation.type === "global") {
+      renderThread();
     }
   });
 
@@ -1147,6 +1348,23 @@ function notifyNewMessage(from, body, type) {
       if (m.mine) m.read = true;
     });
     if (isActiveDm(by)) renderThread();
+  });
+
+  socket.on("typing", ({ from, active }) => noteTyping("dm", from, active));
+  socket.on("global-typing", ({ username, active }) => noteTyping("global", username, active));
+
+  socket.on("presence", ({ username, active }) => {
+    const key = username.toLowerCase();
+    const changed = active ? !activeUsernames.has(key) : activeUsernames.has(key);
+    if (active) activeUsernames.add(key);
+    else activeUsernames.delete(key);
+    if (!changed) return;
+    // Only worth a re-render if that person is actually visible somewhere.
+    const inSidebar = conversations.some((c) => sameUsername(c.username, username));
+    const inThread =
+      isActiveDm(username) || (activeConversation && activeConversation.type === "global");
+    if (inSidebar) renderConversationList();
+    if (inThread) renderThread();
   });
 
   // If a DM thread is open when the tab regains focus, treat its messages

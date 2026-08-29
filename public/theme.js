@@ -22,6 +22,10 @@ function setTheme(theme) {
     btn.textContent = theme === "dark" ? "☀️" : "🌙";
     btn.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
   });
+  // Lets messages.js reapply a per-user custom background whenever the
+  // theme switches, without theme.js needing to know anything about that
+  // feature itself.
+  if (typeof window.onThemeChanged === "function") window.onThemeChanged(theme);
 }
 
 function toggleTheme() {

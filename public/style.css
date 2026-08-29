@@ -718,6 +718,10 @@ h1 {
   border-bottom: 1px solid var(--line);
 }
 
+.context-menu-danger {
+  color: #9A3324;
+}
+
 .chat-main {
   display: flex;
   flex-direction: column;
@@ -1238,6 +1242,12 @@ img.avatar {
   margin-right: 4px;
 }
 
+.reply-quote-removed {
+  font-style: italic;
+  opacity: 0.7;
+  cursor: default;
+}
+
 /* Reply bar above the composer, shown while composing a reply */
 .reply-bar {
   display: flex;
@@ -1533,4 +1543,34 @@ img.avatar {
 @media (max-width: 480px) {
   .modal { max-height: 100vh; border-radius: 0; }
   .modal-overlay { padding: 0; }
+}
+
+/* ---------- Presence dot (green light for actively-viewing contacts) ---------- */
+
+.avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.presence-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #43b581;
+  border: 2px solid var(--paper);
+}
+
+/* ---------- Typing indicator ---------- */
+
+.typing-indicator {
+  margin: 0;
+  padding: 4px 24px;
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--bark);
+  min-height: 1.4em;
 }
