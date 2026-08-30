@@ -6,7 +6,8 @@
 // password), and receiving all of the above live over the socket.
 
 let me = null;
-let activeConversation = null; // { type: "dm", username } | { type: "global" } | null
+let activeConversation = null; // { type: "dm", username } | { type: "group", id, name } | { type: "global" } | null
+const groupCache = new Map();
 let conversations = []; // [{username, body, type, created_at, nameColor, avatarUrl, unread}]
 const threadCache = new Map(); // username -> messages array
 let globalMessages = null; // null until first loaded
@@ -30,9 +31,10 @@ const els = {
   newForm: document.getElementById("new-message-form"),
   newInput: document.getElementById("new-username"),
   newError: document.getElementById("new-message-error"),
+  createGroupBtn: document.getElementById("create-group-btn"), groupCreateForm: document.getElementById("group-create-form"), groupUsernames: document.getElementById("group-usernames"), groupName: document.getElementById("group-name"), groupCreateCancel: document.getElementById("group-create-cancel"),
   emptyState: document.getElementById("empty-state"),
   threadView: document.getElementById("thread-view"),
-  threadTitle: document.getElementById("thread-title"),
+  threadTitle: document.getElementById("thread-title"), groupRenameBtn: document.getElementById("group-rename-btn"),
   threadWrap: document.getElementById("thread-wrap"),
   thread: document.getElementById("thread"),
   dropHint: document.getElementById("drop-hint"),
@@ -45,7 +47,7 @@ const els = {
   emojiSearch: document.getElementById("emoji-search"),
   emojiGrid: document.getElementById("emoji-grid"),
   imageBtn: document.getElementById("image-btn"),
-  imageInput: document.getElementById("image-input"),
+  imageInput: document.getElementById("image-input"), gifBtn: document.getElementById("gif-btn"), gifPanel: document.getElementById("gif-panel"), gifSearch: document.getElementById("gif-search"), gifResults: document.getElementById("gif-results"),
   sidebar: document.getElementById("sidebar"),
   main: document.getElementById("main"),
   backLink: document.getElementById("back-link"),
@@ -99,6 +101,10 @@ const els = {
   newPasswordInput: document.getElementById("new-password-input"),
   confirmPasswordInput: document.getElementById("confirm-password-input"),
   passwordError: document.getElementById("password-error"),
+  adminModeForm: document.getElementById("admin-mode-form"),
+  adminModePassword: document.getElementById("admin-mode-password"),
+  adminModeError: document.getElementById("admin-mode-error"),
+  adminModeStatus: document.getElementById("admin-mode-status"),
   relationsList: document.getElementById("relations-list"),
   logoutBtn: document.getElementById("logout-btn"),
 };
@@ -216,11 +222,12 @@ async function ensurePartnerProfile(username) {
 }
 
 function renderConversationList() {
-  if (conversations.length === 0) {
+  if (conversations.length === 0 && groupCache.size === 0) {
     els.convList.innerHTML = `<p class="chat-sidebar-empty">No conversations yet — start one above.</p>`;
     return;
   }
-  els.convList.innerHTML = conversations
+  const groupButtons=[...groupCache.values()].map(g=>`<button class="conversation-item group-conversation ${isActiveGroup(g.id)?"active":""}" data-group-id="${g.id}"><span class="group-avatar">👥</span><div class="conv-open-text"><div class="conv-name">${escapeHtml(g.name)}</div><div class="conv-preview">${escapeHtml(groupPreview(g))}</div></div></button>`).join("");
+  els.convList.innerHTML = groupButtons + conversations
     .map((c) => {
       const active = isActiveDm(c.username) ? "active" : "";
       const unread = c.unread || 0;
@@ -362,11 +369,23 @@ document.addEventListener("click", (e) => {
 });
 
 // ---- Opening a DM thread ------------------------------------------------------
+function isActiveGroup(id){return activeConversation?.type==="group"&&Number(activeConversation.id)===Number(id)}
+function groupMessages(id){return groupCache.get(Number(id))?.messages||[]}
+function groupPreview(g){return previewFor(g.body||"",g.type||"text")}
+function youtubeIdFromClient(v){try{const u=new URL(v);if(u.hostname==="youtu.be")return u.pathname.slice(1).split("/")[0];if(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com"].includes(u.hostname)){if(u.pathname==="/watch")return u.searchParams.get("v");const m=u.pathname.match(/^\/(shorts|embed)\/([^/?]+)/);return m?.[2]||null}}catch{}return null}
+function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return null;const u=m[0].replace(/[),.!?]+$/g,"");return youtubeIdFromClient(u)?u:null}
+function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
+async function loadGroups(){const d=await apiGet("/api/groups");for(const g of d.groups||[])groupCache.set(Number(g.id),{...g,members:[],messages:[]});renderConversationList()}
+async function openGroup(id){id=Number(id);const g=groupCache.get(id);if(!g)return;const d=await apiGet(`/api/groups/${id}`);groupCache.set(id,{...g,...d.group,messages:d.messages||[]});activeConversation={type:"group",id,name:d.group.name};els.emptyState.classList.add("is-hidden");els.threadView.classList.remove("is-hidden");els.threadTitle.textContent=d.group.name;els.groupRenameBtn?.classList.remove("is-hidden");els.sidebar.classList.add("hide-on-mobile");els.main.classList.remove("hide-on-mobile");socketRef?.emit("join-group",id);renderConversationList();renderThread();els.composerInput.focus()}
+els.createGroupBtn?.addEventListener("click",()=>els.groupCreateForm.classList.toggle("is-hidden"));els.groupCreateCancel?.addEventListener("click",()=>els.groupCreateForm.classList.add("is-hidden"));els.groupCreateForm?.addEventListener("submit",async e=>{e.preventDefault();try{const d=await apiPost("/api/groups",{usernames:els.groupUsernames.value.split(",").map(x=>x.trim()).filter(Boolean),name:els.groupName.value.trim()});groupCache.set(Number(d.group.id),{...d.group,messages:[],members:d.group.members});els.groupCreateForm.reset();els.groupCreateForm.classList.add("is-hidden");renderConversationList();openGroup(d.group.id)}catch(err){els.newError.textContent=err.message}});
+els.groupRenameBtn?.addEventListener("click",async()=>{if(activeConversation?.type!=="group")return;const n=prompt("New group name:",activeConversation.name);if(n==null)return;try{const d=await apiPatch(`/api/groups/${activeConversation.id}`,{name:n});activeConversation.name=d.name;els.threadTitle.textContent=d.name;const g=groupCache.get(activeConversation.id);if(g)g.name=d.name;renderConversationList()}catch(e){els.composerError.textContent=e.message}});
+els.convList.addEventListener("click",e=>{const b=e.target.closest("[data-group-id]");if(b)openGroup(b.dataset.groupId)});
+
 async function openThread(username) {
   activeConversation = { type: "dm", username };
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
-  els.threadTitle.textContent = "@" + username;
+  els.threadTitle.textContent = "@" + username; els.groupRenameBtn?.classList.add("is-hidden");
   els.sidebar.classList.add("hide-on-mobile");
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
@@ -402,7 +421,7 @@ async function openGlobal() {
   activeConversation = { type: "global" };
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
-  els.threadTitle.textContent = "🌐 Global Chat";
+  els.threadTitle.textContent = "🌐 Global Chat"; els.groupRenameBtn?.classList.add("is-hidden");
   els.sidebar.classList.add("hide-on-mobile");
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
@@ -449,28 +468,28 @@ function renderBubble(m, isGlobal) {
       avatarUrl = (partnerProfiles.get(activeConversation.username.toLowerCase()) || {}).avatarUrl;
     }
   }
-  const avatarOwner = isGlobal ? m.sender : activeConversation.username;
+  const isGroup = activeConversation?.type === "group";
+  const avatarOwner = isGlobal || isGroup ? m.sender : activeConversation.username;
   const avatar = !m.mine ? avatarHtml(avatarOwner, avatarUrl, "avatar-sm", true) : "";
   const nameStyle = isGlobal && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
   const senderLabel =
-    isGlobal && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
+    (isGlobal || isGroup) && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
   const seen = !isGlobal && m.mine ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>` : "";
   const editedTag = m.edited ? `<span class="edited-tag">(edited)</span>` : "";
   const replyQuote = renderReplyQuote(m.reply);
 
-  const canManage = m.mine;
-  const actions = `<div class="bubble-actions">
+  const canManage = m.mine && !isGroup;
+  const canAdminManageGlobal = isGlobal && Boolean(me?.isAdmin);
+  const actions = isGroup ? "" : `<div class="bubble-actions">
       <button type="button" class="bubble-action-btn" data-action="reply" title="Reply">↩</button>
-      ${canManage && m.type === "text" ? `<button type="button" class="bubble-action-btn" data-action="edit" title="Edit">✎</button>` : ""}
-      ${canManage ? `<button type="button" class="bubble-action-btn" data-action="delete" title="Unsend">🗑</button>` : ""}
+      ${(canManage || canAdminManageGlobal) && m.type === "text" ? `<button type="button" class="bubble-action-btn" data-action="edit" title="Edit">✎</button>` : ""}
+      ${(canManage || canAdminManageGlobal) ? `<button type="button" class="bubble-action-btn" data-action="delete" title="Delete">🗑</button>` : ""}
     </div>`;
 
   let bubbleInner;
-  if (m.type === "image") {
-    bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.body)}" alt="Image message" loading="lazy" /></div>`;
-  } else {
-    bubbleInner = `<div class="bubble ${side}">${replyQuote}${escapeHtml(m.body)}</div>`;
-  }
+  if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" /></div>`;
+  else if (m.type === "youtube") { const vid=youtubeIdFromClient(m.body); bubbleInner=`<div class="bubble bubble-embed ${side}">${replyQuote}${vid?`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}" title="YouTube video" loading="lazy" allowfullscreen></iframe>`:escapeHtml(m.body)}</div>`; }
+  else bubbleInner=`<div class="bubble ${side}">${replyQuote}${escapeHtml(m.body)}</div>`;
 
   return `<div class="bubble-group ${side}" data-id="${m.id ?? ""}">
     ${senderLabel}
@@ -481,11 +500,7 @@ function renderBubble(m, isGlobal) {
 
 function renderThread() {
   const isGlobal = activeConversation && activeConversation.type === "global";
-  const messages = isGlobal
-    ? globalMessages || []
-    : activeConversation
-    ? threadCache.get(activeConversation.username) || []
-    : [];
+  const messages = isGlobal ? globalMessages || [] : activeConversation?.type === "group" ? groupMessages(activeConversation.id) : activeConversation ? threadCache.get(activeConversation.username) || [] : [];
   els.thread.innerHTML = messages.map((m) => renderBubble(m, isGlobal)).join("");
   els.thread.scrollTop = els.thread.scrollHeight;
 }
@@ -765,6 +780,8 @@ els.composer.addEventListener("submit", async (e) => {
   const replyPayload = reply ? { id: reply.id, body: reply.body, type: reply.type, sender: reply.sender } : null;
   cancelReply();
 
+  if (activeConversation.type === "group") { const g=groupCache.get(activeConversation.id); if(!g)return; const yt=extractYouTubeUrl(body),gif=extractGifUrl(body),type=yt?"youtube":gif?"gif":"text"; try { const r=type==="gif"?await apiPost("/api/gifs/send",{groupId:activeConversation.id,url:gif}):await apiPost(`/api/groups/${activeConversation.id}/messages`,{body:type==="youtube"?yt:body,type}); g.messages.push(r.message);g.body=r.message.body;g.type=r.message.type;renderThread();renderConversationList(); } catch(e){els.composerError.textContent=e.message} return; }
+
   if (activeConversation.type === "global") {
     appendGlobalMessage(me.username, body, true, "text", {
       nameColor: me.nameColor,
@@ -807,6 +824,8 @@ function sendTypingPing(active) {
   lastTypingPingAt = active ? now : 0;
   if (activeConversation.type === "global") {
     socketRef.emit("typing", { scope: "global", active });
+  } else if (activeConversation.type === "group") {
+    socketRef.emit("group-typing", { groupId: activeConversation.id, active });
   } else {
     socketRef.emit("typing", { scope: "dm", to: activeConversation.username, active });
   }
@@ -866,6 +885,9 @@ function renderTypingIndicator() {
   els.typingIndicator.textContent = text;
   els.typingIndicator.classList.remove("is-hidden");
 }
+
+function closeGifPanel(){els.gifPanel?.classList.add("is-hidden")}
+els.gifBtn?.addEventListener("click",()=>{els.gifPanel.classList.toggle("is-hidden");if(!els.gifPanel.classList.contains("is-hidden"))els.gifSearch.focus()});let gifTimer=null;els.gifSearch?.addEventListener("input",()=>{clearTimeout(gifTimer);gifTimer=setTimeout(async()=>{const q=els.gifSearch.value.trim();if(!q){els.gifResults.innerHTML="";return}try{const d=await apiGet(`/api/gifs/search?q=${encodeURIComponent(q)}`);els.gifResults.innerHTML=(d.results||[]).map(x=>`<button type="button" class="gif-result" data-gif-url="${escapeHtml(x.gifUrl)}"><img src="${escapeHtml(x.previewUrl||x.gifUrl)}" alt="GIF" /></button>`).join("")||"No GIFs found."}catch(e){els.gifResults.textContent=e.message}},350)});els.gifResults?.addEventListener("click",async e=>{const b=e.target.closest("[data-gif-url]");if(!b||activeConversation?.type!=="group")return;try{const r=await apiPost("/api/gifs/send",{groupId:activeConversation.id,url:b.dataset.gifUrl});const g=groupCache.get(activeConversation.id);g.messages.push(r.message);g.body="GIF";g.type="gif";closeGifPanel();renderThread();renderConversationList()}catch(err){els.composerError.textContent=err.message}});
 
 // ---- Emoji picker -----------------------------------------------------------
 function renderEmojiGrid(query) {
@@ -1135,6 +1157,12 @@ function openSettings() {
   if (els.themeError) els.themeError.textContent = "";
   els.usernameError.textContent = "";
   els.passwordError.textContent = "";
+  if (els.adminModeError) els.adminModeError.textContent = "";
+  if (els.adminModePassword) els.adminModePassword.value = "";
+  if (els.adminModeStatus) els.adminModeStatus.textContent = me?.isAdmin
+    ? "Admin mode is enabled permanently on this account."
+    : "Admin mode lets you edit and delete anyone's messages in Global Chat.";
+  if (els.adminModeForm) els.adminModeForm.classList.toggle("is-hidden", Boolean(me?.isAdmin));
   els.settingsOverlay.classList.remove("is-hidden");
 }
 
@@ -1147,6 +1175,23 @@ els.settingsBtnThread?.addEventListener("click", openSettings);
 els.settingsClose.addEventListener("click", closeSettings);
 els.settingsOverlay.addEventListener("click", (e) => {
   if (e.target === els.settingsOverlay) closeSettings();
+});
+
+els.adminModeForm?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (me?.isAdmin) return;
+  const password = els.adminModePassword.value;
+  els.adminModeError.textContent = "";
+  try {
+    await apiPost("/api/admin-mode", { password });
+    me.isAdmin = true;
+    els.adminModePassword.value = "";
+    els.adminModeForm.classList.add("is-hidden");
+    els.adminModeStatus.textContent = "Admin mode is enabled permanently on this account.";
+    renderThread();
+  } catch (err) {
+    els.adminModeError.textContent = err.message;
+  }
 });
 
 els.avatarUploadBtn.addEventListener("click", () => els.avatarInput.click());
@@ -1334,6 +1379,7 @@ document.addEventListener("visibilitychange", reportFocusState);
   (relations.blocked || []).forEach((u) => blockedUsers.add(u));
 
   await loadConversations();
+  await loadGroups();
 
   try {
     const presence = await apiGet("/api/presence");
@@ -1354,6 +1400,11 @@ document.addEventListener("visibilitychange", reportFocusState);
   const socket = io({ withCredentials: true });
   socketRef = socket;
   socket.on("connect", reportFocusState);
+
+  socket.on("group-created",g=>{groupCache.set(Number(g.id),{...g,messages:[],body:"",type:"text"});renderConversationList();socket.emit("join-group",g.id)});
+  socket.on("group-renamed",({groupId,name})=>{const g=groupCache.get(Number(groupId));if(g)g.name=name;if(isActiveGroup(groupId)){activeConversation.name=name;els.threadTitle.textContent=name}renderConversationList()});
+  socket.on("group-message",m=>{const g=groupCache.get(Number(m.groupId));if(!g||m.sender===me.username)return;g.messages.push(m);g.body=m.body;g.type=m.type;if(isActiveGroup(m.groupId))renderThread();renderConversationList()});
+  socket.on("group-typing",({groupId,username,active})=>noteTyping(`group:${groupId}`,username,active));
 
   socket.on("message", ({ id, from, body, type, reply }) => {
     const active = isActiveDm(from) && document.hasFocus();

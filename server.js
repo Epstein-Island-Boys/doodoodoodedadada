@@ -15,6 +15,7 @@ const { createClient } = require("@libsql/client");
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-this-in-production";
+const ADMIN_MODE_PASSWORD = process.env.ADMIN_MODE_PASSWORD || "SussyBaka67";
 
 // ---- Database (Turso / libSQL) ---------------------------------------------
 // This used to be a local SQLite file, which is why data disappeared on every
@@ -149,6 +150,10 @@ async function initDb() {
       PRIMARY KEY (owner_id, target_id)
     )
   `);
+  await db.execute(`CREATE TABLE IF NOT EXISTS group_chats (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS group_members (group_id INTEGER NOT NULL REFERENCES group_chats(id), user_id INTEGER NOT NULL REFERENCES users(id), joined_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(group_id,user_id))`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS group_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL REFERENCES group_chats(id), sender_id INTEGER NOT NULL REFERENCES users(id), body TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'text', created_at TEXT NOT NULL DEFAULT (datetime('now')), edited_at TEXT)`);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id,created_at,id)");
 
   // Images now live in Turso too (as blobs), instead of the local /uploads
   // folder, which had the same disappears-on-redeploy problem as the old
@@ -183,6 +188,9 @@ async function initDb() {
   }
   if (!userColumns.includes("theme_dark_bg")) {
     await db.execute("ALTER TABLE users ADD COLUMN theme_dark_bg TEXT");
+  }
+  if (!userColumns.includes("is_admin")) {
+    await db.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
   }
 }
 
@@ -339,7 +347,7 @@ app.get("/api/me", async (req, res) => {
   if (!req.session.userId) return res.json({ loggedIn: false });
 
   const result = await db.execute({
-    sql: "SELECT username, name_color, avatar_image_id, theme_light_bg, theme_dark_bg FROM users WHERE id = ?",
+    sql: "SELECT username, name_color, avatar_image_id, theme_light_bg, theme_dark_bg, is_admin FROM users WHERE id = ?",
     args: [req.session.userId],
   });
   const user = result.rows[0];
@@ -352,6 +360,7 @@ app.get("/api/me", async (req, res) => {
     avatarUrl: avatarUrlFor(user.avatar_image_id),
     themeLightBg: user.theme_light_bg || null,
     themeDarkBg: user.theme_dark_bg || null,
+    isAdmin: Boolean(user.is_admin),
   });
 });
 
@@ -553,6 +562,21 @@ app.post("/api/relations", requireAuth, async (req, res) => {
   }
   res.json({ ok: true, target: targetUser.username, relation });
 });
+
+// ---- Group chats --------------------------------------------------------------
+async function getGroupForUser(groupId, userId) { const r=await db.execute({sql:`SELECT g.id,g.name,g.created_by FROM group_chats g JOIN group_members gm ON gm.group_id=g.id WHERE g.id=? AND gm.user_id=?`,args:[Number(groupId),userId]}); return r.rows[0]||null; }
+async function getGroupMembers(groupId) { const r=await db.execute({sql:`SELECT u.id,u.username,u.name_color,u.avatar_image_id FROM group_members gm JOIN users u ON u.id=gm.user_id WHERE gm.group_id=? ORDER BY u.username COLLATE NOCASE`,args:[Number(groupId)]}); return r.rows.map(x=>({id:Number(x.id),username:x.username,nameColor:x.name_color||null,avatarUrl:avatarUrlFor(x.avatar_image_id)})); }
+async function broadcastGroup(groupId,event,payload){ for(const u of await getGroupMembers(groupId)) for(const sid of onlineSockets.get(u.id)||[]) io.to(sid).emit(event,payload); }
+app.get("/api/groups",requireAuth,async(req,res)=>{const r=await db.execute({sql:`SELECT g.id,g.name,g.created_at,(SELECT body FROM group_messages WHERE group_id=g.id ORDER BY created_at DESC,id DESC LIMIT 1) last_body,(SELECT type FROM group_messages WHERE group_id=g.id ORDER BY created_at DESC,id DESC LIMIT 1) last_type FROM group_chats g JOIN group_members gm ON gm.group_id=g.id WHERE gm.user_id=? ORDER BY g.created_at DESC`,args:[req.session.userId]});res.json({groups:r.rows.map(x=>({id:Number(x.id),name:x.name,created_at:x.created_at,body:x.last_body||"",type:x.last_type||"text"}))});});
+app.post("/api/groups",requireAuth,async(req,res)=>{const names=[...new Set((Array.isArray(req.body?.usernames)?req.body.usernames:[]).map(x=>String(x).trim()).filter(Boolean))].filter(x=>!usernameLower(x)||usernameLower(x)!==usernameLower(req.session.username));if(!names.length)return res.status(400).json({error:"Add at least one other username."});if(names.length>49)return res.status(400).json({error:"Groups can have up to 50 members."});const us=[await getUserByUsername(req.session.username)];for(const n of names){const u=await getUserByUsername(n);if(!u)return res.status(404).json({error:`No user with username ${n}.`});us.push(u);}const name=(typeof req.body?.name==='string'&&req.body.name.trim().slice(0,80))||us.slice(1).map(x=>x.username).join(", ").slice(0,80)||"Group Chat";const info=await db.execute({sql:"INSERT INTO group_chats(name,created_by) VALUES(?,?)",args:[name,req.session.userId]});const id=insertedId(info);for(const u of us)await db.execute({sql:"INSERT INTO group_members(group_id,user_id) VALUES(?,?)",args:[id,u.id]});const g={id,name,members:us.map(u=>({id:Number(u.id),username:u.username,nameColor:u.name_color||null,avatarUrl:avatarUrlFor(u.avatar_image_id)}))};for(const u of us)for(const sid of onlineSockets.get(u.id)||[])io.to(sid).emit("group-created",g);res.json({ok:true,group:g});});
+app.get("/api/groups/:id",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const members=await getGroupMembers(g.id);const r=await db.execute({sql:`SELECT gm.id,gm.body,gm.type,gm.created_at,gm.edited_at,u.username sender,u.name_color,u.avatar_image_id,gm.sender_id FROM group_messages gm JOIN users u ON u.id=gm.sender_id WHERE gm.group_id=? ORDER BY gm.created_at ASC,gm.id ASC LIMIT 300`,args:[g.id]});res.json({group:{id:Number(g.id),name:g.name,members},messages:r.rows.map(x=>({id:Number(x.id),body:x.body,type:x.type,created_at:x.created_at,edited:x.edited_at!=null,sender:x.sender,nameColor:x.name_color||null,avatarUrl:avatarUrlFor(x.avatar_image_id),mine:Number(x.sender_id)===Number(req.session.userId)}))});});
+app.patch("/api/groups/:id",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const name=String(req.body?.name||"").trim();if(!name||name.length>80)return res.status(400).json({error:"Group name must be 1-80 characters."});await db.execute({sql:"UPDATE group_chats SET name=? WHERE id=?",args:[name,g.id]});await broadcastGroup(g.id,"group-renamed",{groupId:Number(g.id),name});res.json({ok:true,groupId:Number(g.id),name});});
+app.post("/api/groups/:id/messages",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const body=String(req.body?.body||"").trim(),type=["text","youtube"].includes(req.body?.type)?req.body.type:"text";if(!body||body.length>4000)return res.status(400).json({error:"Message must be 1-4000 characters."});const info=await db.execute({sql:"INSERT INTO group_messages(group_id,sender_id,body,type) VALUES(?,?,?,?)",args:[g.id,req.session.userId,body,type]});const me=await getUserByUsername(req.session.username),cr=await db.execute({sql:"SELECT created_at FROM group_messages WHERE id=?",args:[insertedId(info)]});const p={id:insertedId(info),groupId:Number(g.id),sender:me.username,nameColor:me.name_color||null,avatarUrl:avatarUrlFor(me.avatar_image_id),body,type,created_at:cr.rows[0].created_at,mine:true};await broadcastGroup(g.id,"group-message",p);res.json({ok:true,message:p});});
+// Tenor search is server-side, so clients never need direct Tenor access. Existing Tenor API keys can be used; new API clients stopped being accepted in Jan 2026.
+const TENOR_API_KEY=process.env.TENOR_API_KEY||"",TENOR_CLIENT_KEY=process.env.TENOR_CLIENT_KEY||"heartwood";
+app.get("/api/gifs/search",requireAuth,async(req,res)=>{const q=String(req.query.q||"").trim();if(!q)return res.json({results:[]});if(!TENOR_API_KEY)return res.status(503).json({error:"GIF search is not configured. Set TENOR_API_KEY on the server."});try{const u=new URL("https://tenor.googleapis.com/v2/search");u.searchParams.set("q",q);u.searchParams.set("key",TENOR_API_KEY);u.searchParams.set("client_key",TENOR_CLIENT_KEY);u.searchParams.set("limit","12");u.searchParams.set("media_filter","tinygif,gif");u.searchParams.set("contentfilter","medium");const rr=await fetch(u,{signal:AbortSignal.timeout(10000)}),d=await rr.json();if(!rr.ok)return res.status(502).json({error:"Tenor search failed."});res.json({results:(d.results||[]).map(x=>({id:x.id,title:x.content_description||"GIF",previewUrl:x.media_formats?.tinygif?.url||x.media_formats?.gif?.url,gifUrl:x.media_formats?.gif?.url||x.media_formats?.tinygif?.url})).filter(x=>x.gifUrl)});}catch{res.status(502).json({error:"Tenor search is unavailable right now."});}});
+async function storeRemoteGif(url,userId){const u=new URL(url);if(!/^https?:$/.test(u.protocol))throw Error("Invalid GIF URL.");const rr=await fetch(u,{redirect:"follow",signal:AbortSignal.timeout(15000)});if(!rr.ok)throw Error("Could not fetch GIF.");const ct=(rr.headers.get("content-type")||"").split(";")[0];if(ct!=="image/gif")throw Error("That URL is not a GIF.");const b=Buffer.from(await rr.arrayBuffer());if(b.length>8*1024*1024)throw Error("GIF is too large (8MB max).");const info=await db.execute({sql:"INSERT INTO images(mime_type,data,uploaded_by) VALUES(?,?,?)",args:[ct,b,userId]});return "/api/images/"+insertedId(info);}
+app.post("/api/gifs/send",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.body?.groupId,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});try{const body=await storeRemoteGif(String(req.body?.url||""),req.session.userId),info=await db.execute({sql:"INSERT INTO group_messages(group_id,sender_id,body,type) VALUES(?,?,?,'gif')",args:[g.id,req.session.userId,body]}),me=await getUserByUsername(req.session.username),cr=await db.execute({sql:"SELECT created_at FROM group_messages WHERE id=?",args:[insertedId(info)]}),p={id:insertedId(info),groupId:Number(g.id),sender:me.username,nameColor:me.name_color||null,avatarUrl:avatarUrlFor(me.avatar_image_id),body,type:"gif",created_at:cr.rows[0].created_at,mine:true};await broadcastGroup(g.id,"group-message",p);res.json({ok:true,message:p});}catch(e){res.status(502).json({error:e.message});}});
 
 // ---- Hiding a conversation from your own inbox -------------------------------
 // This never touches message history — it just adds a per-owner flag that
@@ -1001,6 +1025,19 @@ app.post("/api/global/messages", requireAuth, async (req, res) => {
 });
 
 // ---- Edit / unsend a global message -------------------------------------------
+async function getGlobalMessageForManager(id, myId) {
+  const result = await db.execute({
+    sql: "SELECT id, sender_id, type FROM global_messages WHERE id = ?",
+    args: [id],
+  });
+  const row = result.rows[0];
+  if (!row) return null;
+  const meResult = await db.execute({ sql: "SELECT is_admin FROM users WHERE id = ?", args: [myId] });
+  const isAdmin = Boolean(meResult.rows[0]?.is_admin);
+  if (row.sender_id !== myId && !isAdmin) return null;
+  return row;
+}
+
 async function getOwnedGlobalMessage(id, myId) {
   const result = await db.execute({
     sql: "SELECT id, sender_id, type FROM global_messages WHERE id = ?",
@@ -1010,6 +1047,16 @@ async function getOwnedGlobalMessage(id, myId) {
   if (!row || row.sender_id !== myId) return null;
   return row;
 }
+
+app.post("/api/admin-mode", requireAuth, async (req, res) => {
+  const password = req.body?.password;
+  if (typeof password !== "string" || password.length !== ADMIN_MODE_PASSWORD.length ||
+      !crypto.timingSafeEqual(Buffer.from(password), Buffer.from(ADMIN_MODE_PASSWORD))) {
+    return res.status(403).json({ error: "Incorrect admin mode password." });
+  }
+  await db.execute({ sql: "UPDATE users SET is_admin = 1 WHERE id = ?", args: [req.session.userId] });
+  res.json({ ok: true, isAdmin: true });
+});
 
 app.patch("/api/global/messages/:id", requireAuth, async (req, res) => {
   const myId = req.session.userId;
@@ -1022,7 +1069,7 @@ app.patch("/api/global/messages/:id", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Messages are limited to 2000 characters." });
   }
 
-  const msg = await getOwnedGlobalMessage(id, myId);
+  const msg = await getGlobalMessageForManager(id, myId);
   if (!msg) return res.status(404).json({ error: "Message not found." });
   if (msg.type !== "text") return res.status(400).json({ error: "Only text messages can be edited." });
 
@@ -1040,7 +1087,7 @@ app.delete("/api/global/messages/:id", requireAuth, async (req, res) => {
   const myId = req.session.userId;
   const id = Number(req.params.id);
 
-  const msg = await getOwnedGlobalMessage(id, myId);
+  const msg = await getGlobalMessageForManager(id, myId);
   if (!msg) return res.status(404).json({ error: "Message not found." });
 
   await db.execute({ sql: "DELETE FROM global_messages WHERE id = ?", args: [id] });
@@ -1194,6 +1241,9 @@ io.on("connection", (socket) => {
   // right after connecting, this just avoids a flash of "inactive".
   socketFocus.set(socket.id, true);
   broadcastPresence(username, true);
+
+  socket.on("join-group", async (groupId) => { if (await getGroupForUser(groupId, userId)) socket.join(`group:${Number(groupId)}`); });
+  socket.on("group-typing", async ({ groupId, active }) => { const g=await getGroupForUser(groupId,userId); if(!g)return; for(const u of await getGroupMembers(g.id)){if(u.id===userId)continue;for(const sid of onlineSockets.get(u.id)||[])io.to(sid).emit("group-typing",{groupId:Number(g.id),username,active:!!active});} });
 
   socket.on("focus-state", ({ focused }) => {
     const wasActive = isUserActive(userId);

@@ -53,6 +53,8 @@
         <input id="new-username" placeholder="Message a username…" autocomplete="off" />
         <button type="submit">Start</button>
       </form>
+      <button type="button" class="create-group-btn" id="create-group-btn">+ Create group chat</button>
+      <form class="group-create-form is-hidden" id="group-create-form"><input id="group-usernames" placeholder="Usernames, comma separated" autocomplete="off" /><input id="group-name" placeholder="Group name (optional)" maxlength="80" autocomplete="off" /><div class="group-create-actions"><button type="submit">Create</button><button type="button" id="group-create-cancel">Cancel</button></div></form>
       <p class="new-message-error" id="new-message-error"></p>
 
       <div class="conversation-list" id="conversation-list">
@@ -69,7 +71,7 @@
         <div class="chat-main-header">
           <div>
             <button class="back-link" id="back-link">&larr; Back</button>
-            <h2 id="thread-title">—</h2>
+            <h2 id="thread-title">—</h2><button type="button" class="group-rename-btn is-hidden" id="group-rename-btn">Rename</button>
           </div>
           <div class="chat-main-header-actions">
             <button type="button" class="online-badge online-badge-header is-hidden" id="global-online-badge-header" aria-haspopup="true">
@@ -97,18 +99,18 @@
         <form class="composer" id="composer">
           <div class="composer-tools">
             <button type="button" class="tool-btn" id="emoji-btn" aria-label="Insert emoji" aria-haspopup="true">🙂</button>
-            <button type="button" class="tool-btn" id="image-btn" aria-label="Send an image">📷</button>
+            <button type="button" class="tool-btn" id="image-btn" aria-label="Send an image">📷</button><button type="button" class="tool-btn" id="gif-btn" aria-label="Search GIFs">GIF</button>
             <input type="file" id="image-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
           </div>
           <input id="composer-input" placeholder="Write a message…" autocomplete="off" maxlength="2000" />
           <button type="submit">Send</button>
 
-          <div class="emoji-panel is-hidden" id="emoji-panel">
+          <div class="gif-panel is-hidden" id="gif-panel"><input id="gif-search" placeholder="Search Tenor GIFs…" autocomplete="off" /><div class="gif-results" id="gif-results"></div><div class="gif-attribution">Powered by Tenor</div></div><div class="emoji-panel is-hidden" id="emoji-panel">
             <input type="text" class="emoji-search" id="emoji-search" placeholder="Search emoji…" autocomplete="off" />
             <div class="emoji-grid" id="emoji-grid"></div>
           </div>
         </form>
-        <p class="composer-error" id="composer-error"></p>
+        <p class="composer-error" id="composer-error"></p><p class="embed-hint">YouTube links and direct GIF links are embedded automatically.</p>
       </div>
     </main>
   </div>
@@ -195,6 +197,16 @@
             <button class="btn" type="submit">Change password</button>
           </form>
           <p class="settings-error" id="password-error"></p>
+        </section>
+
+        <section class="settings-section" id="admin-mode-section">
+          <h3>Admin mode</h3>
+          <p class="settings-hint" id="admin-mode-status">Admin mode lets you edit and delete anyone's messages in Global Chat.</p>
+          <form class="settings-form" id="admin-mode-form">
+            <input id="admin-mode-password" type="password" placeholder="Admin mode password" autocomplete="off" />
+            <button class="btn" type="submit">Enable</button>
+          </form>
+          <p class="settings-error" id="admin-mode-error"></p>
         </section>
 
         <section class="settings-section">
