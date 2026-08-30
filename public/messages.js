@@ -377,6 +377,21 @@ function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return
 function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
 async function loadGroups(){const d=await apiGet("/api/groups");for(const g of d.groups||[])groupCache.set(Number(g.id),{...g,members:[],messages:[]});renderConversationList()}
 async function openGroup(id){id=Number(id);const g=groupCache.get(id);if(!g)return;const d=await apiGet(`/api/groups/${id}`);groupCache.set(id,{...g,...d.group,messages:d.messages||[]});activeConversation={type:"group",id,name:d.group.name};els.emptyState.classList.add("is-hidden");els.threadView.classList.remove("is-hidden");els.threadTitle.textContent=d.group.name;els.groupRenameBtn?.classList.remove("is-hidden");els.sidebar.classList.add("hide-on-mobile");els.main.classList.remove("hide-on-mobile");socketRef?.emit("join-group",id);renderConversationList();renderThread();els.composerInput.focus()}
+function renderLinkedText(raw){
+  const text=String(raw||"");
+  const re=/https?:\/\/[^\s<>]+/ig;
+  let out="", last=0, match;
+  while((match=re.exec(text))){
+    const url=match[0].replace(/[),.!?]+$/g,"");
+    const trailing=match[0].slice(url.length);
+    out+=escapeHtml(text.slice(last,match.index));
+    out+=`<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
+    out+=escapeHtml(trailing);
+    last=match.index+match[0].length;
+  }
+  return out+escapeHtml(text.slice(last));
+}
+
 els.createGroupBtn?.addEventListener("click",()=>els.groupCreateForm.classList.toggle("is-hidden"));els.groupCreateCancel?.addEventListener("click",()=>els.groupCreateForm.classList.add("is-hidden"));els.groupCreateForm?.addEventListener("submit",async e=>{e.preventDefault();try{const d=await apiPost("/api/groups",{usernames:els.groupUsernames.value.split(",").map(x=>x.trim()).filter(Boolean),name:els.groupName.value.trim()});groupCache.set(Number(d.group.id),{...d.group,messages:[],members:d.group.members});els.groupCreateForm.reset();els.groupCreateForm.classList.add("is-hidden");renderConversationList();openGroup(d.group.id)}catch(err){els.newError.textContent=err.message}});
 els.groupRenameBtn?.addEventListener("click",async()=>{if(activeConversation?.type!=="group")return;const n=prompt("New group name:",activeConversation.name);if(n==null)return;try{const d=await apiPatch(`/api/groups/${activeConversation.id}`,{name:n});activeConversation.name=d.name;els.threadTitle.textContent=d.name;const g=groupCache.get(activeConversation.id);if(g)g.name=d.name;renderConversationList()}catch(e){els.composerError.textContent=e.message}});
 els.convList.addEventListener("click",e=>{const b=e.target.closest("[data-group-id]");if(b)openGroup(b.dataset.groupId)});
@@ -487,9 +502,12 @@ function renderBubble(m, isGlobal) {
     </div>`;
 
   let bubbleInner;
-  if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" /></div>`;
-  else if (m.type === "youtube") { const vid=youtubeIdFromClient(m.body); bubbleInner=`<div class="bubble bubble-embed ${side}">${replyQuote}${vid?`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}" title="YouTube video" loading="lazy" allowfullscreen></iframe>`:escapeHtml(m.body)}</div>`; }
-  else bubbleInner=`<div class="bubble ${side}">${replyQuote}${escapeHtml(m.body)}</div>`;
+  const detectedYouTube = m.type === "text" ? extractYouTubeUrl(m.body) : null;
+  const detectedGif = m.type === "text" ? extractGifUrl(m.body) : null;
+  if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" />${m.type === "gif" ? `<a class="embed-source-link" href="${escapeHtml(m.body)}" target="_blank" rel="noopener noreferrer">Open GIF</a>` : ""}</div>`;
+  else if (m.type === "youtube" || detectedYouTube) { const sourceUrl=m.type === "youtube"?m.body:detectedYouTube; const vid=youtubeIdFromClient(sourceUrl); bubbleInner=`<div class="bubble bubble-embed ${side}">${replyQuote}${vid?`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}" title="YouTube video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe><a class="embed-source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceUrl)}</a>`:renderLinkedText(m.body)}</div>`; }
+  else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(detectedGif)}" alt="GIF" loading="lazy" /><a class="embed-source-link" href="${escapeHtml(detectedGif)}" target="_blank" rel="noopener noreferrer">Open GIF</a></div>`;
+  else bubbleInner=`<div class="bubble ${side}">${replyQuote}${renderLinkedText(m.body)}</div>`;
 
   return `<div class="bubble-group ${side}" data-id="${m.id ?? ""}">
     ${senderLabel}
@@ -782,30 +800,28 @@ els.composer.addEventListener("submit", async (e) => {
 
   if (activeConversation.type === "group") { const g=groupCache.get(activeConversation.id); if(!g)return; const yt=extractYouTubeUrl(body),gif=extractGifUrl(body),type=yt?"youtube":gif?"gif":"text"; try { const r=type==="gif"?await apiPost("/api/gifs/send",{groupId:activeConversation.id,url:gif}):await apiPost(`/api/groups/${activeConversation.id}/messages`,{body:type==="youtube"?yt:body,type}); g.messages.push(r.message);g.body=r.message.body;g.type=r.message.type;renderThread();renderConversationList(); } catch(e){els.composerError.textContent=e.message} return; }
 
+  const yt=extractYouTubeUrl(body), gif=extractGifUrl(body), detectedType=yt?"youtube":gif?"gif":"text";
   if (activeConversation.type === "global") {
-    appendGlobalMessage(me.username, body, true, "text", {
-      nameColor: me.nameColor,
-      avatarUrl: me.avatarUrl,
-      reply: replyPayload,
+    appendGlobalMessage(me.username, detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body, true, detectedType, {
+      nameColor: me.nameColor, avatarUrl: me.avatarUrl, reply: replyPayload,
     });
     try {
-      const res = await apiPost("/api/global/messages", { body, replyTo: reply ? reply.id : undefined });
-      replaceGlobalMessageBody(body, res.message.body, res.message.id);
-    } catch (err) {
-      appendGlobalMessage(me.username, `Failed to send: ${err.message}`, false, "text");
-    }
+      const res = await apiPost("/api/global/messages", { body: detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body, type: detectedType, replyTo: reply ? reply.id : undefined });
+      replaceGlobalMessageBody(detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body, res.message.body, res.message.id);
+      const local=globalMessages?.find(m=>String(m.id)===String(res.message.id)); if(local) local.type=res.message.type;
+    } catch (err) { appendGlobalMessage(me.username, `Failed to send: ${err.message}`, false, "text"); }
     return;
   }
 
   const to = activeConversation.username;
-  appendMessage(to, body, true, "text", { reply: replyPayload });
-  bumpConversationPreview(to, body, "text");
+  appendMessage(to, detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body, true, detectedType, { reply: replyPayload });
+  bumpConversationPreview(to, detectedType === "gif" ? "GIF" : detectedType === "youtube" ? yt : body, detectedType);
   try {
-    const res = await apiPost("/api/messages", { to, body, replyTo: reply ? reply.id : undefined });
-    replaceMessageBody(to, body, res.message.body, res.message.id);
-  } catch (err) {
-    appendMessage(to, `Failed to send: ${err.message}`, false, "text");
-  }
+    const sentBody=detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body;
+    const res = await apiPost("/api/messages", { to, body: sentBody, type: detectedType, replyTo: reply ? reply.id : undefined });
+    replaceMessageBody(to, sentBody, res.message.body, res.message.id);
+    const list=threadCache.get(to)||[], local=[...list].reverse().find(m=>String(m.id)===String(res.message.id)); if(local) local.type=res.message.type;
+  } catch (err) { appendMessage(to, `Failed to send: ${err.message}`, false, "text"); }
 });
 
 // ---- Typing indicator ---------------------------------------------------------

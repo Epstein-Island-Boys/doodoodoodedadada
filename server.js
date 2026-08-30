@@ -572,9 +572,20 @@ app.post("/api/groups",requireAuth,async(req,res)=>{const names=[...new Set((Arr
 app.get("/api/groups/:id",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const members=await getGroupMembers(g.id);const r=await db.execute({sql:`SELECT gm.id,gm.body,gm.type,gm.created_at,gm.edited_at,u.username sender,u.name_color,u.avatar_image_id,gm.sender_id FROM group_messages gm JOIN users u ON u.id=gm.sender_id WHERE gm.group_id=? ORDER BY gm.created_at ASC,gm.id ASC LIMIT 300`,args:[g.id]});res.json({group:{id:Number(g.id),name:g.name,members},messages:r.rows.map(x=>({id:Number(x.id),body:x.body,type:x.type,created_at:x.created_at,edited:x.edited_at!=null,sender:x.sender,nameColor:x.name_color||null,avatarUrl:avatarUrlFor(x.avatar_image_id),mine:Number(x.sender_id)===Number(req.session.userId)}))});});
 app.patch("/api/groups/:id",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const name=String(req.body?.name||"").trim();if(!name||name.length>80)return res.status(400).json({error:"Group name must be 1-80 characters."});await db.execute({sql:"UPDATE group_chats SET name=? WHERE id=?",args:[name,g.id]});await broadcastGroup(g.id,"group-renamed",{groupId:Number(g.id),name});res.json({ok:true,groupId:Number(g.id),name});});
 app.post("/api/groups/:id/messages",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const body=String(req.body?.body||"").trim(),type=["text","youtube"].includes(req.body?.type)?req.body.type:"text";if(!body||body.length>4000)return res.status(400).json({error:"Message must be 1-4000 characters."});const info=await db.execute({sql:"INSERT INTO group_messages(group_id,sender_id,body,type) VALUES(?,?,?,?)",args:[g.id,req.session.userId,body,type]});const me=await getUserByUsername(req.session.username),cr=await db.execute({sql:"SELECT created_at FROM group_messages WHERE id=?",args:[insertedId(info)]});const p={id:insertedId(info),groupId:Number(g.id),sender:me.username,nameColor:me.name_color||null,avatarUrl:avatarUrlFor(me.avatar_image_id),body,type,created_at:cr.rows[0].created_at,mine:true};await broadcastGroup(g.id,"group-message",p);res.json({ok:true,message:p});});
-// Tenor search is server-side, so clients never need direct Tenor access. Existing Tenor API keys can be used; new API clients stopped being accepted in Jan 2026.
-const TENOR_API_KEY=process.env.TENOR_API_KEY||"",TENOR_CLIENT_KEY=process.env.TENOR_CLIENT_KEY||"heartwood";
-app.get("/api/gifs/search",requireAuth,async(req,res)=>{const q=String(req.query.q||"").trim();if(!q)return res.json({results:[]});if(!TENOR_API_KEY)return res.status(503).json({error:"GIF search is not configured. Set TENOR_API_KEY on the server."});try{const u=new URL("https://tenor.googleapis.com/v2/search");u.searchParams.set("q",q);u.searchParams.set("key",TENOR_API_KEY);u.searchParams.set("client_key",TENOR_CLIENT_KEY);u.searchParams.set("limit","12");u.searchParams.set("media_filter","tinygif,gif");u.searchParams.set("contentfilter","medium");const rr=await fetch(u,{signal:AbortSignal.timeout(10000)}),d=await rr.json();if(!rr.ok)return res.status(502).json({error:"Tenor search failed."});res.json({results:(d.results||[]).map(x=>({id:x.id,title:x.content_description||"GIF",previewUrl:x.media_formats?.tinygif?.url||x.media_formats?.gif?.url,gifUrl:x.media_formats?.gif?.url||x.media_formats?.tinygif?.url})).filter(x=>x.gifUrl)});}catch{res.status(502).json({error:"Tenor search is unavailable right now."});}});
+// Tenor's API was discontinued on June 30, 2026. Use KLIPY's Tenor-compatible v2 API instead.
+const KLIPY_API_KEY=process.env.KLIPY_API_KEY||process.env.TENOR_API_KEY||"";
+app.get("/api/gifs/search",requireAuth,async(req,res)=>{
+  const q=String(req.query.q||"").trim().slice(0,100);
+  if(!q)return res.json({results:[]});
+  if(!KLIPY_API_KEY)return res.status(503).json({error:"GIF search is not configured. Set KLIPY_API_KEY on the server."});
+  try{
+    const u=new URL("https://api.klipy.com/v2/search");
+    u.searchParams.set("q",q);u.searchParams.set("key",KLIPY_API_KEY);u.searchParams.set("limit","12");u.searchParams.set("media_filter","tinygif,gif");u.searchParams.set("contentfilter","medium");u.searchParams.set("country","US");u.searchParams.set("locale","en_US");
+    const rr=await fetch(u,{signal:AbortSignal.timeout(10000)}),d=await rr.json();
+    if(!rr.ok)return res.status(502).json({error:"GIF search provider failed."});
+    res.json({results:(d.results||[]).map(x=>({id:x.id,title:x.content_description||x.title||"GIF",previewUrl:x.media_formats?.tinygif?.url||x.media_formats?.preview?.url||x.media_formats?.gif?.url,gifUrl:x.media_formats?.gif?.url||x.media_formats?.tinygif?.url})).filter(x=>x.gifUrl)});
+  }catch{res.status(502).json({error:"GIF search is unavailable right now."});}
+});
 async function storeRemoteGif(url,userId){const u=new URL(url);if(!/^https?:$/.test(u.protocol))throw Error("Invalid GIF URL.");const rr=await fetch(u,{redirect:"follow",signal:AbortSignal.timeout(15000)});if(!rr.ok)throw Error("Could not fetch GIF.");const ct=(rr.headers.get("content-type")||"").split(";")[0];if(ct!=="image/gif")throw Error("That URL is not a GIF.");const b=Buffer.from(await rr.arrayBuffer());if(b.length>8*1024*1024)throw Error("GIF is too large (8MB max).");const info=await db.execute({sql:"INSERT INTO images(mime_type,data,uploaded_by) VALUES(?,?,?)",args:[ct,b,userId]});return "/api/images/"+insertedId(info);}
 app.post("/api/gifs/send",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.body?.groupId,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});try{const body=await storeRemoteGif(String(req.body?.url||""),req.session.userId),info=await db.execute({sql:"INSERT INTO group_messages(group_id,sender_id,body,type) VALUES(?,?,?,'gif')",args:[g.id,req.session.userId,body]}),me=await getUserByUsername(req.session.username),cr=await db.execute({sql:"SELECT created_at FROM group_messages WHERE id=?",args:[insertedId(info)]}),p={id:insertedId(info),groupId:Number(g.id),sender:me.username,nameColor:me.name_color||null,avatarUrl:avatarUrlFor(me.avatar_image_id),body,type:"gif",created_at:cr.rows[0].created_at,mine:true};await broadcastGroup(g.id,"group-message",p);res.json({ok:true,message:p});}catch(e){res.status(502).json({error:e.message});}});
 
@@ -733,6 +744,7 @@ async function getOwnedMessage(id, myId) {
 app.post("/api/messages", requireAuth, async (req, res) => {
   const myId = req.session.userId;
   const { to, body, replyTo } = req.body || {};
+  const requestedType = ["text", "youtube", "gif"].includes(req.body?.type) ? req.body.type : "text";
 
   if (typeof to !== "string" || typeof body !== "string" || !body.trim()) {
     return res.status(400).json({ error: "A recipient and message body are required." });
@@ -772,10 +784,12 @@ app.post("/api/messages", requireAuth, async (req, res) => {
     }
   }
 
-  const trimmedBody = body.trim();
+  let trimmedBody = body.trim();
+  const messageType = requestedType;
+  if (messageType === "gif") trimmedBody = await storeRemoteGif(trimmedBody, myId);
   const info = await db.execute({
-    sql: "INSERT INTO messages (sender_id, recipient_id, body, reply_to_id) VALUES (?, ?, ?, ?)",
-    args: [myId, recipient.id, trimmedBody, replyToId],
+    sql: "INSERT INTO messages (sender_id, recipient_id, body, type, reply_to_id) VALUES (?, ?, ?, ?, ?)",
+    args: [myId, recipient.id, trimmedBody, messageType, replyToId],
   });
   await clearConversationHides(myId, recipient.id);
   const createdResult = await db.execute({
@@ -790,7 +804,7 @@ app.post("/api/messages", requireAuth, async (req, res) => {
     from: req.session.username,
     to: recipient.username,
     body: trimmedBody,
-    type: "text",
+    type: messageType,
     created_at,
     reply: replyPreview,
   };
@@ -971,6 +985,7 @@ function broadcastGlobalAll(event, payload) {
 app.post("/api/global/messages", requireAuth, async (req, res) => {
   const myId = req.session.userId;
   const { body, replyTo } = req.body || {};
+  const requestedType = ["text", "youtube", "gif"].includes(req.body?.type) ? req.body.type : "text";
   if (typeof body !== "string" || !body.trim()) {
     return res.status(400).json({ error: "A message body is required." });
   }
@@ -994,10 +1009,12 @@ app.post("/api/global/messages", requireAuth, async (req, res) => {
     }
   }
 
-  const trimmedBody = body.trim();
+  let trimmedBody = body.trim();
+  const messageType = requestedType;
+  if (messageType === "gif") trimmedBody = await storeRemoteGif(trimmedBody, myId);
   const info = await db.execute({
-    sql: "INSERT INTO global_messages (sender_id, body, reply_to_id) VALUES (?, ?, ?)",
-    args: [myId, trimmedBody, replyToId],
+    sql: "INSERT INTO global_messages (sender_id, body, type, reply_to_id) VALUES (?, ?, ?, ?)",
+    args: [myId, trimmedBody, messageType, replyToId],
   });
   const createdResult = await db.execute({
     sql: "SELECT created_at FROM global_messages WHERE id = ?",
@@ -1016,7 +1033,7 @@ app.post("/api/global/messages", requireAuth, async (req, res) => {
     nameColor: me.name_color || null,
     avatarUrl: avatarUrlFor(me.avatar_image_id),
     body: trimmedBody,
-    type: "text",
+    type: messageType,
     created_at: createdResult.rows[0].created_at,
     reply: replyPreview,
   };
