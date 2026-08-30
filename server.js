@@ -1128,9 +1128,15 @@ io.engine.use(sessionMiddleware);
 // devices gets the message pushed to both.
 const onlineSockets = new Map();
 
+// userId -> username, for turning "who's connected right now" into names
+// without a DB round-trip. Populated/cleared alongside onlineSockets.
+const onlineUserNames = new Map();
+
 // socketId -> whether that particular tab currently has focus. A user
 // counts as "actively looking at the tab" (the green presence dot) if ANY
-// of their open sockets is focused.
+// of their open sockets is focused. This is separate from "online" (merely
+// connected) below — online covers the Global Chat headcount, active/focus
+// covers the per-contact presence dot.
 const socketFocus = new Map();
 
 function isUserActive(userId) {
@@ -1147,6 +1153,19 @@ function broadcastPresence(username, active) {
     for (const socketId of socketIds) io.to(socketId).emit("presence", { username, active });
   }
 }
+
+// Broadcast when someone's connection count crosses 0<->1 — i.e. they
+// actually joined or left, not just switched tabs/focus.
+function broadcastOnline(username, online) {
+  for (const socketIds of onlineSockets.values()) {
+    for (const socketId of socketIds) io.to(socketId).emit("online-changed", { username, online });
+  }
+}
+
+// ---- Who's online right now (for the Global Chat headcount) -----------------
+app.get("/api/online", requireAuth, (req, res) => {
+  res.json({ online: [...onlineUserNames.values()] });
+});
 
 // Looks up a user id by username for relaying a "typing" ping — small and
 // used only for that, so it's kept local to the socket handler below.
@@ -1166,8 +1185,11 @@ io.on("connection", (socket) => {
   }
   const userId = session.userId;
   const username = session.username;
-  if (!onlineSockets.has(userId)) onlineSockets.set(userId, new Set());
+  const isFirstConnectionForUser = !onlineSockets.has(userId);
+  if (isFirstConnectionForUser) onlineSockets.set(userId, new Set());
   onlineSockets.get(userId).add(socket.id);
+  onlineUserNames.set(userId, username);
+  if (isFirstConnectionForUser) broadcastOnline(username, true);
   // Assume focused until told otherwise — the client sends its real state
   // right after connecting, this just avoids a flash of "inactive".
   socketFocus.set(socket.id, true);
@@ -1200,7 +1222,9 @@ io.on("connection", (socket) => {
     onlineSockets.get(userId)?.delete(socket.id);
     if (onlineSockets.get(userId)?.size === 0) {
       onlineSockets.delete(userId);
+      onlineUserNames.delete(userId);
       broadcastPresence(username, false);
+      broadcastOnline(username, false);
     } else if (!isUserActive(userId)) {
       broadcastPresence(username, false);
     }

@@ -19,6 +19,9 @@ const partnerProfiles = new Map(); // username(lower) -> { avatarUrl, nameColor 
 // don't carry sender info per-message (unlike global ones), since a DM
 // thread only ever has two participants, so we look theirs up once here.
 const activeUsernames = new Set(); // usernames currently looking at their tab (lowercased)
+const onlineUsers = new Map(); // lowercased username -> display-cased username, for anyone
+// currently connected at all — a superset of activeUsernames, used for the
+// Global Chat headcount/popover.
 const typingUsers = new Map(); // scope key -> Map(username -> timeoutId)
 
 const els = {
@@ -48,6 +51,11 @@ const els = {
   backLink: document.getElementById("back-link"),
   globalBtn: document.getElementById("global-chat-btn"),
   globalPreview: document.getElementById("global-chat-preview"),
+  globalOnlineCount: document.getElementById("global-online-count"),
+  globalOnlineBadgeHeader: document.getElementById("global-online-badge-header"),
+  globalOnlineCountHeader: document.getElementById("global-online-count-header"),
+  onlinePopover: document.getElementById("online-popover"),
+  onlinePopoverList: document.getElementById("online-popover-list"),
   notifBanner: document.getElementById("notif-banner"),
   notifEnableBtn: document.getElementById("notif-enable-btn"),
   notifDismissBtn: document.getElementById("notif-dismiss-btn"),
@@ -139,7 +147,50 @@ function avatarHtml(username, avatarUrl, extraClass = "", showPresence = false) 
   return `<span class="avatar-wrap">${inner}${dot}</span>`;
 }
 
-// ---- Conversation list (DMs) -------------------------------------------------
+// ---- Online-users indicator (Global Chat) --------------------------------------
+function renderOnlineBadges() {
+  const count = onlineUsers.size;
+  if (els.globalOnlineCount) els.globalOnlineCount.textContent = String(count);
+  if (els.globalOnlineCountHeader) els.globalOnlineCountHeader.textContent = String(count);
+  const isGlobalOpen = activeConversation && activeConversation.type === "global";
+  els.globalOnlineBadgeHeader?.classList.toggle("is-hidden", !isGlobalOpen);
+  if (!els.onlinePopover.classList.contains("is-hidden")) renderOnlinePopoverList();
+}
+
+function renderOnlinePopoverList() {
+  if (!els.onlinePopoverList) return;
+  const names = [...onlineUsers.values()].sort((a, b) => a.localeCompare(b));
+  if (names.length === 0) {
+    els.onlinePopoverList.innerHTML = `<p class="online-popover-item">Nobody else is online right now.</p>`;
+    return;
+  }
+  els.onlinePopoverList.innerHTML = names
+    .map((n) => `<div class="online-popover-item"><span class="online-badge-dot"></span>${escapeHtml(n)}</div>`)
+    .join("");
+}
+
+function toggleOnlinePopover() {
+  const hidden = els.onlinePopover.classList.contains("is-hidden");
+  if (hidden) {
+    renderOnlinePopoverList();
+    els.onlinePopover.classList.remove("is-hidden");
+  } else {
+    els.onlinePopover.classList.add("is-hidden");
+  }
+}
+
+els.globalOnlineBadgeHeader?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleOnlinePopover();
+});
+
+document.addEventListener("click", (e) => {
+  if (els.onlinePopover.classList.contains("is-hidden")) return;
+  if (els.onlinePopover.contains(e.target) || els.globalOnlineBadgeHeader?.contains(e.target)) return;
+  els.onlinePopover.classList.add("is-hidden");
+});
+
+
 async function loadConversations() {
   const data = await apiGet("/api/conversations");
   conversations = data.conversations || [];
@@ -185,7 +236,7 @@ function renderConversationList() {
         <button class="conv-open" data-username="${escapeHtml(c.username)}">
           ${avatarHtml(c.username, c.avatarUrl, "", true)}
           <div class="conv-open-text">
-            <div class="conv-name">${escapeHtml(c.username)} ${badge}</div>
+            <div class="conv-name">${escapeHtml(c.username)} ${hasUnread ? `<span class="unread-dot" title="Unread"></span>` : ""} ${badge}</div>
             <div class="conv-preview">${escapeHtml(previewText)}</div>
           </div>
           ${hasUnread ? `<span class="unread-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
@@ -324,6 +375,8 @@ async function openThread(username) {
   els.globalBtn.classList.remove("active");
   renderConversationList();
   renderTypingIndicator();
+  renderOnlineBadges();
+  els.onlinePopover.classList.add("is-hidden");
 
   if (!threadCache.has(username)) {
     const data = await apiGet(`/api/messages/${encodeURIComponent(username)}`);
@@ -358,6 +411,7 @@ async function openGlobal() {
   els.globalBtn.classList.add("active");
   renderConversationList();
   renderTypingIndicator();
+  renderOnlineBadges();
 
   if (globalMessages === null) {
     const data = await apiGet("/api/global/messages");
@@ -1289,6 +1343,14 @@ document.addEventListener("visibilitychange", reportFocusState);
     // Non-critical — presence dots just won't show until the first live update.
   }
 
+  try {
+    const online = await apiGet("/api/online");
+    (online.online || []).forEach((u) => onlineUsers.set(u.toLowerCase(), u));
+    renderOnlineBadges();
+  } catch {
+    // Non-critical — the headcount just won't show until the first live update.
+  }
+
   const socket = io({ withCredentials: true });
   socketRef = socket;
   socket.on("connect", reportFocusState);
@@ -1365,6 +1427,13 @@ document.addEventListener("visibilitychange", reportFocusState);
       isActiveDm(username) || (activeConversation && activeConversation.type === "global");
     if (inSidebar) renderConversationList();
     if (inThread) renderThread();
+  });
+
+  socket.on("online-changed", ({ username, online }) => {
+    const key = username.toLowerCase();
+    if (online) onlineUsers.set(key, username);
+    else onlineUsers.delete(key);
+    renderOnlineBadges();
   });
 
   // If a DM thread is open when the tab regains focus, treat its messages

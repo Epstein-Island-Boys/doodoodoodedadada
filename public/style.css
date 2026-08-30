@@ -1562,6 +1562,109 @@ img.avatar {
   border-radius: 50%;
   background: #43b581;
   border: 2px solid var(--paper);
+  animation: presence-blink 1.6s ease-in-out infinite;
+}
+
+@keyframes presence-blink {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(67, 181, 129, 0.55); }
+  50% { opacity: 0.55; box-shadow: 0 0 0 3px rgba(67, 181, 129, 0); }
+}
+
+/* ---------- Unread dot (blue) — sits next to a conversation's name in
+   addition to the existing full-row highlight and count badge. ---------- */
+
+.unread-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3B82F6;
+  margin-left: 6px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+/* ---------- Online-users indicator (Global Chat) ---------- */
+
+.online-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--bark);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: default;
+}
+
+.online-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #43b581;
+  animation: presence-blink 1.6s ease-in-out infinite;
+}
+
+.online-badge-header {
+  cursor: pointer;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.online-badge-header:hover {
+  background: rgba(140, 163, 122, 0.15);
+}
+
+.chat-main-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.online-popover {
+  position: absolute;
+  top: 54px;
+  right: 24px;
+  z-index: 20;
+  min-width: 180px;
+  max-width: 240px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  padding: 10px 0;
+}
+
+.online-popover-title {
+  margin: 0 14px 6px;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bark);
+}
+
+.online-popover-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.online-popover-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 0.85rem;
+}
+
+.online-popover-item .online-badge-dot {
+  animation: none;
 }
 
 /* ---------- Typing indicator ---------- */

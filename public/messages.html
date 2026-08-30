@@ -40,10 +40,13 @@
 
       <button class="global-chat-item" id="global-chat-btn">
         <span class="global-chat-icon" aria-hidden="true">🌐</span>
-        <div>
+        <div class="conv-open-text">
           <div class="conv-name">Global Chat</div>
           <div class="conv-preview" id="global-chat-preview">Say hello to everyone.</div>
         </div>
+        <span class="online-badge" id="global-online-badge" title="Online now">
+          <span class="online-badge-dot"></span><span id="global-online-count">0</span>
+        </span>
       </button>
 
       <form class="new-message" id="new-message-form">
@@ -68,7 +71,16 @@
             <button class="back-link" id="back-link">&larr; Back</button>
             <h2 id="thread-title">—</h2>
           </div>
-          <button type="button" class="icon-btn" id="settings-btn-thread" aria-label="Settings">⚙️</button>
+          <div class="chat-main-header-actions">
+            <button type="button" class="online-badge online-badge-header is-hidden" id="global-online-badge-header" aria-haspopup="true">
+              <span class="online-badge-dot"></span><span id="global-online-count-header">0</span> online
+            </button>
+            <button type="button" class="icon-btn" id="settings-btn-thread" aria-label="Settings">⚙️</button>
+          </div>
+        </div>
+        <div class="online-popover is-hidden" id="online-popover">
+          <p class="online-popover-title">Online now</p>
+          <div id="online-popover-list" class="online-popover-list"></div>
         </div>
         <div class="thread-wrap" id="thread-wrap">
           <div class="thread" id="thread"></div>
