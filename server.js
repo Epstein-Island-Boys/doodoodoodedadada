@@ -1002,7 +1002,7 @@ const GLOBAL_HISTORY_LIMIT = 200;
 // up storage again. (Images are the expensive part, since their bytes live
 // in the `images` table, so when a pruned message was an image we delete
 // that row too instead of leaving an orphaned blob behind.)
-const MAX_GLOBAL_MESSAGES = 500;
+const MAX_GLOBAL_MESSAGES = 200;
 
 async function pruneGlobalMessages() {
   // Find the ids of any messages beyond the newest MAX_GLOBAL_MESSAGES.
