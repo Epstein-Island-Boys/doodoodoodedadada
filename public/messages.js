@@ -6,8 +6,7 @@
 // password), and receiving all of the above live over the socket.
 
 let me = null;
-let activeConversation = null; // { type: "dm", username } | { type: "group", id, name } | { type: "global" } | null
-const groupCache = new Map();
+let activeConversation = null; // { type: "dm", username } | { type: "global" } | null
 let conversations = []; // [{username, body, type, created_at, nameColor, avatarUrl, unread}]
 const threadCache = new Map(); // username -> messages array
 let globalMessages = null; // null until first loaded
@@ -31,17 +30,9 @@ const els = {
   newForm: document.getElementById("new-message-form"),
   newInput: document.getElementById("new-username"),
   newError: document.getElementById("new-message-error"),
-  createGroupBtn: document.getElementById("create-group-btn"), groupCreateForm: document.getElementById("group-create-form"), groupUsernames: document.getElementById("group-usernames"), groupName: document.getElementById("group-name"), groupCreateCancel: document.getElementById("group-create-cancel"),
   emptyState: document.getElementById("empty-state"),
   threadView: document.getElementById("thread-view"),
-  threadTitle: document.getElementById("thread-title"), groupRenameBtn: document.getElementById("group-rename-btn"),
-  groupMembersBtn: document.getElementById("group-members-btn"),
-  groupMembersPopover: document.getElementById("group-members-popover"),
-  groupMembersList: document.getElementById("group-members-list"),
-  groupAddMemberForm: document.getElementById("group-add-member-form"),
-  groupAddMemberInput: document.getElementById("group-add-member-input"),
-  groupMembersError: document.getElementById("group-members-error"),
-  leaveGroupBtn: document.getElementById("leave-group-btn"),
+  threadTitle: document.getElementById("thread-title"),
   threadWrap: document.getElementById("thread-wrap"),
   thread: document.getElementById("thread"),
   dropHint: document.getElementById("drop-hint"),
@@ -229,12 +220,11 @@ async function ensurePartnerProfile(username) {
 }
 
 function renderConversationList() {
-  if (conversations.length === 0 && groupCache.size === 0) {
+  if (conversations.length === 0) {
     els.convList.innerHTML = `<p class="chat-sidebar-empty">No conversations yet — start one above.</p>`;
     return;
   }
-  const groupButtons=[...groupCache.values()].map(g=>`<button class="conversation-item group-conversation ${isActiveGroup(g.id)?"active":""}" data-group-id="${g.id}"><span class="group-avatar">👥</span><div class="conv-open-text"><div class="conv-name">${escapeHtml(g.name)}</div><div class="conv-preview">${escapeHtml(groupPreview(g))}</div></div></button>`).join("");
-  els.convList.innerHTML = groupButtons + conversations
+  els.convList.innerHTML = conversations
     .map((c) => {
       const active = isActiveDm(c.username) ? "active" : "";
       const unread = c.unread || 0;
@@ -376,119 +366,10 @@ document.addEventListener("click", (e) => {
 });
 
 // ---- Opening a DM thread ------------------------------------------------------
-function isActiveGroup(id){return activeConversation?.type==="group"&&Number(activeConversation.id)===Number(id)}
-function groupMessages(id){return groupCache.get(Number(id))?.messages||[]}
-function groupPreview(g){return previewFor(g.body||"",g.type||"text")}
 function youtubeIdFromClient(v){try{const u=new URL(v);if(u.hostname==="youtu.be")return u.pathname.slice(1).split("/")[0];if(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com"].includes(u.hostname)){if(u.pathname==="/watch")return u.searchParams.get("v");const m=u.pathname.match(/^\/(shorts|embed)\/([^/?]+)/);return m?.[2]||null}}catch{}return null}
 function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return null;const u=m[0].replace(/[),.!?]+$/g,"");return youtubeIdFromClient(u)?u:null}
 function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname)||/(^|\.)tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
 function gifDisplayUrl(url){try{const u=new URL(url);if(/(^|\.)tenor\.com$/i.test(u.hostname)||/(^|\.)media\.tenor\.com$/i.test(u.hostname))return `/api/gifs/tenor-proxy?url=${encodeURIComponent(url)}`;}catch{}return url}
-async function loadGroups(){const d=await apiGet("/api/groups");for(const g of d.groups||[])groupCache.set(Number(g.id),{...g,members:[],messages:[]});renderConversationList()}
-async function openGroup(id) {
-  id = Number(id);
-  const g = groupCache.get(id);
-  if (!g) return;
-  const d = await apiGet(`/api/groups/${id}`);
-  groupCache.set(id, { ...g, ...d.group, messages: d.messages || [] });
-  activeConversation = { type: "group", id, name: d.group.name };
-  els.emptyState.classList.add("is-hidden");
-  els.threadView.classList.remove("is-hidden");
-  els.threadTitle.textContent = d.group.name;
-  els.groupRenameBtn?.classList.remove("is-hidden");
-  els.groupMembersBtn?.classList.remove("is-hidden");
-  els.groupMembersPopover?.classList.add("is-hidden");
-  els.sidebar.classList.add("hide-on-mobile");
-  els.main.classList.remove("hide-on-mobile");
-  socketRef?.emit("join-group", id);
-  renderConversationList();
-  renderThread();
-  els.composerInput.focus();
-}
-
-els.groupRenameBtn?.addEventListener("click", async () => {
-  if (activeConversation?.type !== "group") return;
-  const n = prompt("New group name:", activeConversation.name);
-  if (n == null) return;
-  try {
-    const d = await apiPatch(`/api/groups/${activeConversation.id}`, { name: n });
-    activeConversation.name = d.name;
-    els.threadTitle.textContent = d.name;
-    const g = groupCache.get(activeConversation.id);
-    if (g) g.name = d.name;
-    renderConversationList();
-  } catch (e) {
-    els.composerError.textContent = e.message;
-  }
-});
-
-function renderGroupMembersList() {
-  if (!els.groupMembersList || activeConversation?.type !== "group") return;
-  const g = groupCache.get(activeConversation.id);
-  const members = g?.members || [];
-  els.groupMembersList.innerHTML = members
-    .map((m) => {
-      const nameStyle = m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
-      return `<div class="online-popover-item">${avatarHtml(m.username, m.avatarUrl, "avatar-sm")}<span${nameStyle}>${escapeHtml(m.username)}</span></div>`;
-    })
-    .join("") || `<p class="online-popover-item">No members.</p>`;
-}
-
-function toggleGroupMembersPopover() {
-  if (!els.groupMembersPopover) return;
-  const hidden = els.groupMembersPopover.classList.contains("is-hidden");
-  if (hidden) {
-    if (els.groupMembersError) els.groupMembersError.textContent = "";
-    renderGroupMembersList();
-    els.groupMembersPopover.classList.remove("is-hidden");
-  } else {
-    els.groupMembersPopover.classList.add("is-hidden");
-  }
-}
-
-els.groupMembersBtn?.addEventListener("click", (e) => {
-  e.stopPropagation();
-  toggleGroupMembersPopover();
-});
-
-document.addEventListener("click", (e) => {
-  if (!els.groupMembersPopover || els.groupMembersPopover.classList.contains("is-hidden")) return;
-  if (els.groupMembersPopover.contains(e.target) || els.groupMembersBtn?.contains(e.target)) return;
-  els.groupMembersPopover.classList.add("is-hidden");
-});
-
-els.groupAddMemberForm?.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (activeConversation?.type !== "group") return;
-  const usernames = els.groupAddMemberInput.value.split(",").map((x) => x.trim()).filter(Boolean);
-  if (!usernames.length) return;
-  try {
-    const d = await apiPost(`/api/groups/${activeConversation.id}/members`, { usernames });
-    const g = groupCache.get(activeConversation.id);
-    if (g) g.members = d.group.members;
-    els.groupAddMemberInput.value = "";
-    if (els.groupMembersError) els.groupMembersError.textContent = "";
-    renderGroupMembersList();
-  } catch (err) {
-    if (els.groupMembersError) els.groupMembersError.textContent = err.message;
-  }
-});
-
-els.leaveGroupBtn?.addEventListener("click", async () => {
-  if (activeConversation?.type !== "group") return;
-  if (!window.confirm("Leave this group chat?")) return;
-  const id = activeConversation.id;
-  try {
-    await apiPost(`/api/groups/${id}/leave`, {});
-    groupCache.delete(id);
-    els.groupMembersPopover?.classList.add("is-hidden");
-    activeConversation = null;
-    els.threadView.classList.add("is-hidden");
-    els.emptyState.classList.remove("is-hidden");
-    renderConversationList();
-  } catch (err) {
-    if (els.groupMembersError) els.groupMembersError.textContent = err.message;
-  }
-});
 
 function renderLinkedText(raw){
   const text=String(raw||"");
@@ -505,14 +386,13 @@ function renderLinkedText(raw){
   return out+escapeHtml(text.slice(last));
 }
 
-els.createGroupBtn?.addEventListener("click",()=>els.groupCreateForm.classList.toggle("is-hidden"));els.groupCreateCancel?.addEventListener("click",()=>els.groupCreateForm.classList.add("is-hidden"));els.groupCreateForm?.addEventListener("submit",async e=>{e.preventDefault();try{const d=await apiPost("/api/groups",{usernames:els.groupUsernames.value.split(",").map(x=>x.trim()).filter(Boolean),name:els.groupName.value.trim()});groupCache.set(Number(d.group.id),{...d.group,messages:[],members:d.group.members});els.groupCreateForm.reset();els.groupCreateForm.classList.add("is-hidden");renderConversationList();openGroup(d.group.id)}catch(err){els.newError.textContent=err.message}});
-els.convList.addEventListener("click",e=>{const b=e.target.closest("[data-group-id]");if(b)openGroup(b.dataset.groupId)});
+
 
 async function openThread(username) {
   activeConversation = { type: "dm", username };
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
-  els.threadTitle.textContent = "@" + username; els.groupRenameBtn?.classList.add("is-hidden"); els.groupMembersBtn?.classList.add("is-hidden"); els.groupMembersPopover?.classList.add("is-hidden");
+  els.threadTitle.textContent = "@" + username;
   els.sidebar.classList.add("hide-on-mobile");
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
@@ -548,7 +428,7 @@ async function openGlobal() {
   activeConversation = { type: "global" };
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
-  els.threadTitle.textContent = "🌐 Global Chat"; els.groupRenameBtn?.classList.add("is-hidden"); els.groupMembersBtn?.classList.add("is-hidden"); els.groupMembersPopover?.classList.add("is-hidden");
+  els.threadTitle.textContent = "🌐 Global Chat";
   els.sidebar.classList.add("hide-on-mobile");
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
@@ -595,12 +475,11 @@ function renderBubble(m, isGlobal) {
       avatarUrl = (partnerProfiles.get(activeConversation.username.toLowerCase()) || {}).avatarUrl;
     }
   }
-  const isGroup = activeConversation?.type === "group";
-  const avatarOwner = isGlobal || isGroup ? m.sender : activeConversation.username;
+  const avatarOwner = isGlobal ? m.sender : activeConversation.username;
   const avatar = !m.mine ? avatarHtml(avatarOwner, avatarUrl, "avatar-sm", true) : "";
-  const nameStyle = (isGlobal || isGroup) && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
+  const nameStyle = isGlobal && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
   const senderLabel =
-    (isGlobal || isGroup) && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
+    isGlobal && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
   const seen = !isGlobal && m.mine ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>` : "";
   const editedTag = m.edited ? `<span class="edited-tag">(edited)</span>` : "";
   const replyQuote = renderReplyQuote(m.reply);
@@ -630,7 +509,7 @@ function renderBubble(m, isGlobal) {
 
 function renderThread() {
   const isGlobal = activeConversation && activeConversation.type === "global";
-  const messages = isGlobal ? globalMessages || [] : activeConversation?.type === "group" ? groupMessages(activeConversation.id) : activeConversation ? threadCache.get(activeConversation.username) || [] : [];
+  const messages = isGlobal ? globalMessages || [] : activeConversation ? threadCache.get(activeConversation.username) || [] : [];
   els.thread.innerHTML = messages.map((m) => renderBubble(m, isGlobal)).join("");
   els.thread.scrollTop = els.thread.scrollHeight;
 }
@@ -713,11 +592,8 @@ els.replyBarCancel.addEventListener("click", cancelReply);
 
 function findMessageById(id) {
   const isGlobal = activeConversation && activeConversation.type === "global";
-  const isGroup = activeConversation && activeConversation.type === "group";
   const list = isGlobal
     ? globalMessages || []
-    : isGroup
-    ? groupMessages(activeConversation.id)
     : activeConversation
     ? threadCache.get(activeConversation.username) || []
     : [];
@@ -748,28 +624,13 @@ function removeGlobalMessage(id) {
   return false;
 }
 
-function removeGroupMessage(groupId, id) {
-  const g = groupCache.get(Number(groupId));
-  if (!g || !g.messages) return false;
-  const idx = g.messages.findIndex((m) => String(m.id) === String(id));
-  if (idx !== -1) {
-    g.messages.splice(idx, 1);
-    return true;
-  }
-  return false;
-}
-
 async function deleteMessage(id) {
   const isGlobal = activeConversation && activeConversation.type === "global";
-  const isGroup = activeConversation && activeConversation.type === "group";
   if (!window.confirm("Unsend this message? It will be removed for everyone.")) return;
   try {
     if (isGlobal) {
       await apiDelete(`/api/global/messages/${id}`);
       removeGlobalMessage(id);
-    } else if (isGroup) {
-      await apiDelete(`/api/groups/${activeConversation.id}/messages/${id}`);
-      removeGroupMessage(activeConversation.id, id);
     } else {
       await apiDelete(`/api/messages/${id}`);
       removeMessageEverywhere(id);
@@ -801,14 +662,11 @@ function startEdit(id) {
 
 async function saveEdit(id, newBody) {
   const isGlobal = activeConversation && activeConversation.type === "global";
-  const isGroup = activeConversation && activeConversation.type === "group";
   const trimmed = newBody.trim();
   if (!trimmed) return;
   try {
     if (isGlobal) {
       await apiPatch(`/api/global/messages/${id}`, { body: trimmed });
-    } else if (isGroup) {
-      await apiPatch(`/api/groups/${activeConversation.id}/messages/${id}`, { body: trimmed });
     } else {
       await apiPatch(`/api/messages/${id}`, { body: trimmed });
     }
@@ -849,10 +707,9 @@ els.thread.addEventListener("click", (e) => {
     const action = actionBtn.dataset.action;
     if (action === "reply") {
       const isGlobal = activeConversation && activeConversation.type === "global";
-      const isGroup = activeConversation && activeConversation.type === "group";
       setReplyBar({
         id: msg.id,
-        sender: msg.mine ? "me" : isGlobal || isGroup ? msg.sender : activeConversation.username,
+        sender: msg.mine ? "me" : isGlobal ? msg.sender : activeConversation.username,
         type: msg.type,
         body: msg.body,
       });
@@ -932,29 +789,6 @@ els.composer.addEventListener("submit", async (e) => {
   const replyPayload = reply ? { id: reply.id, body: reply.body, type: reply.type, sender: reply.sender } : null;
   cancelReply();
 
-  if (activeConversation.type === "group") {
-    const g = groupCache.get(activeConversation.id);
-    if (!g) return;
-    const yt = extractYouTubeUrl(body);
-    const gif = extractGifUrl(body);
-    const type = yt ? "youtube" : gif ? "gif" : "text";
-    try {
-      const r =
-        type === "gif"
-          ? await apiPost("/api/gifs/send", { groupId: activeConversation.id, url: gif, replyTo: reply ? reply.id : undefined })
-          : await apiPost(`/api/groups/${activeConversation.id}/messages`, { body: type === "youtube" ? yt : body, type, replyTo: reply ? reply.id : undefined });
-      g.messages.push(r.message);
-      g.body = r.message.body;
-      g.type = r.message.type;
-      renderThread();
-      renderConversationList();
-    } catch (e) {
-      els.composerError.textContent = e.message;
-    }
-    return;
-  }
-
-
   const yt=extractYouTubeUrl(body), gif=extractGifUrl(body), detectedType=yt?"youtube":gif?"gif":"text";
   if (activeConversation.type === "global") {
     appendGlobalMessage(me.username, detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body, true, detectedType, {
@@ -995,8 +829,6 @@ function sendTypingPing(active) {
   lastTypingPingAt = active ? now : 0;
   if (activeConversation.type === "global") {
     socketRef.emit("typing", { scope: "global", active });
-  } else if (activeConversation.type === "group") {
-    socketRef.emit("group-typing", { groupId: activeConversation.id, active });
   } else {
     socketRef.emit("typing", { scope: "dm", to: activeConversation.username, active });
   }
@@ -1060,11 +892,6 @@ function renderTypingIndicator() {
 function closeGifPanel(){els.gifPanel?.classList.add("is-hidden")}
 async function sendSelectedGif(url){
   if(!activeConversation) return;
-  if(activeConversation.type==="group"){
-    const g=groupCache.get(activeConversation.id); if(!g) return;
-    const r=await apiPost("/api/gifs/send",{groupId:activeConversation.id,url});
-    g.messages.push(r.message);g.body="GIF";g.type="gif";renderThread();renderConversationList();return;
-  }
   if(activeConversation.type==="global"){
     appendGlobalMessage(me.username,url,true,"gif",{nameColor:me.nameColor,avatarUrl:me.avatarUrl});
     const r=await apiPost("/api/global/messages",{body:url,type:"gif"});
@@ -1076,7 +903,7 @@ async function sendSelectedGif(url){
   const r=await apiPost("/api/messages",{to,body:url,type:"gif"});
   replaceMessageBody(to,url,r.message.body,r.message.id);
 }
-els.gifBtn?.addEventListener("click",()=>{els.gifPanel.classList.toggle("is-hidden");if(!els.gifPanel.classList.contains("is-hidden"))els.gifSearch.focus()});let gifTimer=null;els.gifSearch?.addEventListener("input",()=>{clearTimeout(gifTimer);gifTimer=setTimeout(async()=>{const q=els.gifSearch.value.trim();if(!q){els.gifResults.innerHTML="";return}try{const d=await apiGet(`/api/gifs/search?q=${encodeURIComponent(q)}`);els.gifResults.innerHTML=(d.results||[]).map(x=>`<button type="button" class="gif-result" data-gif-url="${escapeHtml(x.gifUrl)}"><img src="${escapeHtml(gifDisplayUrl(x.previewUrl||x.gifUrl))}" alt="GIF" /></button>`).join("")||"No GIFs found."}catch(e){els.gifResults.textContent=e.message}},350)});els.gifResults?.addEventListener("click",async e=>{const b=e.target.closest("[data-gif-url]");if(!b||!activeConversation)return;try{const url=b.dataset.gifUrl;if(activeConversation.type==="group"){const r=await apiPost("/api/gifs/send",{groupId:activeConversation.id,url});const g=groupCache.get(activeConversation.id);g.messages.push(r.message);g.body="GIF";g.type="gif";closeGifPanel();renderThread();renderConversationList();}else{await sendSelectedGif(url);closeGifPanel();}}catch(err){els.composerError.textContent=err.message}});
+els.gifBtn?.addEventListener("click",()=>{els.gifPanel.classList.toggle("is-hidden");if(!els.gifPanel.classList.contains("is-hidden"))els.gifSearch.focus()});let gifTimer=null;els.gifSearch?.addEventListener("input",()=>{clearTimeout(gifTimer);gifTimer=setTimeout(async()=>{const q=els.gifSearch.value.trim();if(!q){els.gifResults.innerHTML="";return}try{const d=await apiGet(`/api/gifs/search?q=${encodeURIComponent(q)}`);els.gifResults.innerHTML=(d.results||[]).map(x=>`<button type="button" class="gif-result" data-gif-url="${escapeHtml(x.gifUrl)}"><img src="${escapeHtml(gifDisplayUrl(x.previewUrl||x.gifUrl))}" alt="GIF" /></button>`).join("")||"No GIFs found."}catch(e){els.gifResults.textContent=e.message}},350)});els.gifResults?.addEventListener("click",async e=>{const b=e.target.closest("[data-gif-url]");if(!b||!activeConversation)return;try{const url=b.dataset.gifUrl;await sendSelectedGif(url);closeGifPanel();}catch(err){els.composerError.textContent=err.message}});
 
 // ---- Emoji picker -----------------------------------------------------------
 function renderEmojiGrid(query) {
@@ -1568,7 +1395,6 @@ document.addEventListener("visibilitychange", reportFocusState);
   (relations.blocked || []).forEach((u) => blockedUsers.add(u));
 
   await loadConversations();
-  await loadGroups();
 
   try {
     const presence = await apiGet("/api/presence");
@@ -1589,34 +1415,6 @@ document.addEventListener("visibilitychange", reportFocusState);
   const socket = io({ withCredentials: true });
   socketRef = socket;
   socket.on("connect", reportFocusState);
-
-  socket.on("group-created",g=>{groupCache.set(Number(g.id),{...g,messages:[],body:"",type:"text"});renderConversationList();socket.emit("join-group",g.id)});
-  socket.on("group-renamed",({groupId,name})=>{const g=groupCache.get(Number(groupId));if(g)g.name=name;if(isActiveGroup(groupId)){activeConversation.name=name;els.threadTitle.textContent=name}renderConversationList()});
-  socket.on("group-message",m=>{const g=groupCache.get(Number(m.groupId));if(!g||m.sender===me.username)return;g.messages.push(m);g.body=m.body;g.type=m.type;if(isActiveGroup(m.groupId))renderThread();renderConversationList()});
-  socket.on("group-message-edited",({groupId,id,body})=>{const g=groupCache.get(Number(groupId));const msg=g?.messages.find(m=>String(m.id)===String(id));if(msg){msg.body=body;msg.edited=true;if(isActiveGroup(groupId))renderThread();}});
-  socket.on("group-message-deleted",({groupId,id})=>{if(removeGroupMessage(groupId,id)&&isActiveGroup(groupId))renderThread();});
-  socket.on("group-members-updated", (group) => {
-    const g = groupCache.get(Number(group.id));
-    if (g) g.members = group.members;
-    if (isActiveGroup(group.id)) renderGroupMembersList();
-  });
-  socket.on("group-member-left", ({ groupId, userId, username: leftUsername }) => {
-    if (sameUsername(leftUsername, me.username)) {
-      // We left from another tab/device — drop the group entirely here too.
-      groupCache.delete(Number(groupId));
-      if (isActiveGroup(groupId)) {
-        activeConversation = null;
-        els.threadView.classList.add("is-hidden");
-        els.emptyState.classList.remove("is-hidden");
-      }
-      renderConversationList();
-      return;
-    }
-    const g = groupCache.get(Number(groupId));
-    if (g && g.members) g.members = g.members.filter((m) => m.username !== leftUsername);
-    if (isActiveGroup(groupId)) renderGroupMembersList();
-  });
-  socket.on("group-typing",({groupId,username,active})=>noteTyping(`group:${groupId}`,username,active));
 
   socket.on("message", ({ id, from, body, type, reply }) => {
     const active = isActiveDm(from) && document.hasFocus();
