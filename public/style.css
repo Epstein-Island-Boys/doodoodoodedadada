@@ -1667,6 +1667,54 @@ img.avatar {
   animation: none;
 }
 
+.group-add-member-form {
+  display: flex;
+  gap: 6px;
+  padding: 8px 14px 4px;
+}
+
+.group-add-member-form input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--body);
+  font-size: 0.82rem;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: inherit;
+}
+
+.group-add-member-form button {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.leave-group-btn {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 6px 14px 4px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #b23b3b;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 0;
+  cursor: pointer;
+}
+
+.leave-group-btn:hover {
+  background: rgba(178, 59, 59, 0.08);
+}
+
 /* ---------- Typing indicator ---------- */
 
 .typing-indicator {

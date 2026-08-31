@@ -150,14 +150,46 @@ async function initDb() {
       PRIMARY KEY (owner_id, target_id)
     )
   `);
-  await db.execute(`CREATE TABLE IF NOT EXISTS group_chats (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS group_members (group_id INTEGER NOT NULL REFERENCES group_chats(id), user_id INTEGER NOT NULL REFERENCES users(id), joined_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(group_id,user_id))`);
-  await db.execute(`CREATE TABLE IF NOT EXISTS group_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL REFERENCES group_chats(id), sender_id INTEGER NOT NULL REFERENCES users(id), body TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'text', created_at TEXT NOT NULL DEFAULT (datetime('now')), edited_at TEXT)`);
-  await db.execute("CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id,created_at,id)");
-  const groupMsgCols = await db.execute("PRAGMA table_info(group_messages)");
-  if (!groupMsgCols.rows.map((c) => c.name).includes("reply_to_id")) {
-    await db.execute("ALTER TABLE group_messages ADD COLUMN reply_to_id INTEGER");
+  // Group chats were rebuilt from scratch — old data intentionally wiped
+  // once via this marker so it doesn't happen again on every restart.
+  await db.execute(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
+  const rebuiltMarker = await db.execute({ sql: "SELECT value FROM meta WHERE key = ?", args: ["group_chat_rebuilt_v2"] });
+  if (!rebuiltMarker.rows[0]) {
+    await db.execute("DROP TABLE IF EXISTS group_messages");
+    await db.execute("DROP TABLE IF EXISTS group_members");
+    await db.execute("DROP TABLE IF EXISTS group_chats");
+    await db.execute({ sql: "INSERT INTO meta (key, value) VALUES (?, ?)", args: ["group_chat_rebuilt_v2", "1"] });
   }
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS group_chats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      created_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id INTEGER NOT NULL REFERENCES group_chats(id),
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (group_id, user_id)
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS group_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL REFERENCES group_chats(id),
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      body TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'text',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      edited_at TEXT,
+      reply_to_id INTEGER
+    )
+  `);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id,created_at,id)");
 
   // Images now live in Turso too (as blobs), instead of the local /uploads
   // folder, which had the same disappears-on-redeploy problem as the old
@@ -705,6 +737,64 @@ app.patch("/api/groups/:id", requireAuth, async (req, res) => {
   await db.execute({ sql: "UPDATE group_chats SET name = ? WHERE id = ?", args: [name, g.id] });
   await broadcastGroup(g.id, "group-renamed", { groupId: Number(g.id), name });
   res.json({ ok: true, groupId: Number(g.id), name });
+});
+
+// Add one or more members to an existing group. Anyone already in the
+// group can add more people, same as most chat apps.
+app.post("/api/groups/:id/members", requireAuth, async (req, res) => {
+  const g = await getGroupForUser(req.params.id, req.session.userId);
+  if (!g) return res.status(404).json({ error: "Group not found." });
+
+  const requested = Array.isArray(req.body?.usernames) ? req.body.usernames : [];
+  const names = [...new Set(requested.map((x) => String(x).trim()).filter(Boolean))];
+  if (!names.length) return res.status(400).json({ error: "Add at least one username." });
+
+  const existingMembers = await getGroupMembers(g.id);
+  const existingIds = new Set(existingMembers.map((m) => m.id));
+  const added = [];
+  for (const n of names) {
+    const u = await getUserByUsername(n);
+    if (!u) return res.status(404).json({ error: `No user with username ${n}.` });
+    if (existingIds.has(Number(u.id))) continue;
+    await db.execute({ sql: "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)", args: [g.id, u.id] });
+    added.push(u);
+    existingIds.add(Number(u.id));
+  }
+  if (!added.length) return res.status(400).json({ error: "Those users are already in the group." });
+
+  const members = await getGroupMembers(g.id);
+  const groupName = (await db.execute({ sql: "SELECT name FROM group_chats WHERE id = ?", args: [g.id] })).rows[0].name;
+  const groupPayload = { id: Number(g.id), name: groupName, members };
+
+  // Existing members get an update to their member list; newly added users
+  // get the full "group-created" treatment so it shows up in their sidebar.
+  await broadcastGroup(g.id, "group-members-updated", groupPayload);
+  for (const u of added) {
+    for (const sid of onlineSockets.get(u.id) || []) io.to(sid).emit("group-created", groupPayload);
+  }
+  res.json({ ok: true, group: groupPayload });
+});
+
+// Leave a group. If that was the last member, clean the group up entirely
+// (messages included) instead of leaving an empty room behind forever.
+app.post("/api/groups/:id/leave", requireAuth, async (req, res) => {
+  const g = await getGroupForUser(req.params.id, req.session.userId);
+  if (!g) return res.status(404).json({ error: "Group not found." });
+
+  const membersBeforeLeaving = await getGroupMembers(g.id);
+  await db.execute({ sql: "DELETE FROM group_members WHERE group_id = ? AND user_id = ?", args: [g.id, req.session.userId] });
+
+  const leftPayload = { groupId: Number(g.id), userId: req.session.userId, username: req.session.username };
+  for (const u of membersBeforeLeaving) {
+    for (const sid of onlineSockets.get(u.id) || []) io.to(sid).emit("group-member-left", leftPayload);
+  }
+
+  const remaining = await getGroupMembers(g.id);
+  if (!remaining.length) {
+    await db.execute({ sql: "DELETE FROM group_messages WHERE group_id = ?", args: [g.id] });
+    await db.execute({ sql: "DELETE FROM group_chats WHERE id = ?", args: [g.id] });
+  }
+  res.json({ ok: true });
 });
 
 app.post("/api/groups/:id/messages", requireAuth, async (req, res) => {

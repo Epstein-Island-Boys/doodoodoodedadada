@@ -35,6 +35,13 @@ const els = {
   emptyState: document.getElementById("empty-state"),
   threadView: document.getElementById("thread-view"),
   threadTitle: document.getElementById("thread-title"), groupRenameBtn: document.getElementById("group-rename-btn"),
+  groupMembersBtn: document.getElementById("group-members-btn"),
+  groupMembersPopover: document.getElementById("group-members-popover"),
+  groupMembersList: document.getElementById("group-members-list"),
+  groupAddMemberForm: document.getElementById("group-add-member-form"),
+  groupAddMemberInput: document.getElementById("group-add-member-input"),
+  groupMembersError: document.getElementById("group-members-error"),
+  leaveGroupBtn: document.getElementById("leave-group-btn"),
   threadWrap: document.getElementById("thread-wrap"),
   thread: document.getElementById("thread"),
   dropHint: document.getElementById("drop-hint"),
@@ -377,7 +384,112 @@ function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return
 function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname)||/(^|\.)tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
 function gifDisplayUrl(url){try{const u=new URL(url);if(/(^|\.)tenor\.com$/i.test(u.hostname)||/(^|\.)media\.tenor\.com$/i.test(u.hostname))return `/api/gifs/tenor-proxy?url=${encodeURIComponent(url)}`;}catch{}return url}
 async function loadGroups(){const d=await apiGet("/api/groups");for(const g of d.groups||[])groupCache.set(Number(g.id),{...g,members:[],messages:[]});renderConversationList()}
-async function openGroup(id){id=Number(id);const g=groupCache.get(id);if(!g)return;const d=await apiGet(`/api/groups/${id}`);groupCache.set(id,{...g,...d.group,messages:d.messages||[]});activeConversation={type:"group",id,name:d.group.name};els.emptyState.classList.add("is-hidden");els.threadView.classList.remove("is-hidden");els.threadTitle.textContent=d.group.name;els.groupRenameBtn?.classList.remove("is-hidden");els.sidebar.classList.add("hide-on-mobile");els.main.classList.remove("hide-on-mobile");socketRef?.emit("join-group",id);renderConversationList();renderThread();els.composerInput.focus()}
+async function openGroup(id) {
+  id = Number(id);
+  const g = groupCache.get(id);
+  if (!g) return;
+  const d = await apiGet(`/api/groups/${id}`);
+  groupCache.set(id, { ...g, ...d.group, messages: d.messages || [] });
+  activeConversation = { type: "group", id, name: d.group.name };
+  els.emptyState.classList.add("is-hidden");
+  els.threadView.classList.remove("is-hidden");
+  els.threadTitle.textContent = d.group.name;
+  els.groupRenameBtn?.classList.remove("is-hidden");
+  els.groupMembersBtn?.classList.remove("is-hidden");
+  els.groupMembersPopover?.classList.add("is-hidden");
+  els.sidebar.classList.add("hide-on-mobile");
+  els.main.classList.remove("hide-on-mobile");
+  socketRef?.emit("join-group", id);
+  renderConversationList();
+  renderThread();
+  els.composerInput.focus();
+}
+
+els.groupRenameBtn?.addEventListener("click", async () => {
+  if (activeConversation?.type !== "group") return;
+  const n = prompt("New group name:", activeConversation.name);
+  if (n == null) return;
+  try {
+    const d = await apiPatch(`/api/groups/${activeConversation.id}`, { name: n });
+    activeConversation.name = d.name;
+    els.threadTitle.textContent = d.name;
+    const g = groupCache.get(activeConversation.id);
+    if (g) g.name = d.name;
+    renderConversationList();
+  } catch (e) {
+    els.composerError.textContent = e.message;
+  }
+});
+
+function renderGroupMembersList() {
+  if (!els.groupMembersList || activeConversation?.type !== "group") return;
+  const g = groupCache.get(activeConversation.id);
+  const members = g?.members || [];
+  els.groupMembersList.innerHTML = members
+    .map((m) => {
+      const nameStyle = m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
+      return `<div class="online-popover-item">${avatarHtml(m.username, m.avatarUrl, "avatar-sm")}<span${nameStyle}>${escapeHtml(m.username)}</span></div>`;
+    })
+    .join("") || `<p class="online-popover-item">No members.</p>`;
+}
+
+function toggleGroupMembersPopover() {
+  if (!els.groupMembersPopover) return;
+  const hidden = els.groupMembersPopover.classList.contains("is-hidden");
+  if (hidden) {
+    if (els.groupMembersError) els.groupMembersError.textContent = "";
+    renderGroupMembersList();
+    els.groupMembersPopover.classList.remove("is-hidden");
+  } else {
+    els.groupMembersPopover.classList.add("is-hidden");
+  }
+}
+
+els.groupMembersBtn?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleGroupMembersPopover();
+});
+
+document.addEventListener("click", (e) => {
+  if (!els.groupMembersPopover || els.groupMembersPopover.classList.contains("is-hidden")) return;
+  if (els.groupMembersPopover.contains(e.target) || els.groupMembersBtn?.contains(e.target)) return;
+  els.groupMembersPopover.classList.add("is-hidden");
+});
+
+els.groupAddMemberForm?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (activeConversation?.type !== "group") return;
+  const usernames = els.groupAddMemberInput.value.split(",").map((x) => x.trim()).filter(Boolean);
+  if (!usernames.length) return;
+  try {
+    const d = await apiPost(`/api/groups/${activeConversation.id}/members`, { usernames });
+    const g = groupCache.get(activeConversation.id);
+    if (g) g.members = d.group.members;
+    els.groupAddMemberInput.value = "";
+    if (els.groupMembersError) els.groupMembersError.textContent = "";
+    renderGroupMembersList();
+  } catch (err) {
+    if (els.groupMembersError) els.groupMembersError.textContent = err.message;
+  }
+});
+
+els.leaveGroupBtn?.addEventListener("click", async () => {
+  if (activeConversation?.type !== "group") return;
+  if (!window.confirm("Leave this group chat?")) return;
+  const id = activeConversation.id;
+  try {
+    await apiPost(`/api/groups/${id}/leave`, {});
+    groupCache.delete(id);
+    els.groupMembersPopover?.classList.add("is-hidden");
+    activeConversation = null;
+    els.threadView.classList.add("is-hidden");
+    els.emptyState.classList.remove("is-hidden");
+    renderConversationList();
+  } catch (err) {
+    if (els.groupMembersError) els.groupMembersError.textContent = err.message;
+  }
+});
+
 function renderLinkedText(raw){
   const text=String(raw||"");
   const re=/https?:\/\/[^\s<>]+/ig;
@@ -394,14 +506,13 @@ function renderLinkedText(raw){
 }
 
 els.createGroupBtn?.addEventListener("click",()=>els.groupCreateForm.classList.toggle("is-hidden"));els.groupCreateCancel?.addEventListener("click",()=>els.groupCreateForm.classList.add("is-hidden"));els.groupCreateForm?.addEventListener("submit",async e=>{e.preventDefault();try{const d=await apiPost("/api/groups",{usernames:els.groupUsernames.value.split(",").map(x=>x.trim()).filter(Boolean),name:els.groupName.value.trim()});groupCache.set(Number(d.group.id),{...d.group,messages:[],members:d.group.members});els.groupCreateForm.reset();els.groupCreateForm.classList.add("is-hidden");renderConversationList();openGroup(d.group.id)}catch(err){els.newError.textContent=err.message}});
-els.groupRenameBtn?.addEventListener("click",async()=>{if(activeConversation?.type!=="group")return;const n=prompt("New group name:",activeConversation.name);if(n==null)return;try{const d=await apiPatch(`/api/groups/${activeConversation.id}`,{name:n});activeConversation.name=d.name;els.threadTitle.textContent=d.name;const g=groupCache.get(activeConversation.id);if(g)g.name=d.name;renderConversationList()}catch(e){els.composerError.textContent=e.message}});
 els.convList.addEventListener("click",e=>{const b=e.target.closest("[data-group-id]");if(b)openGroup(b.dataset.groupId)});
 
 async function openThread(username) {
   activeConversation = { type: "dm", username };
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
-  els.threadTitle.textContent = "@" + username; els.groupRenameBtn?.classList.add("is-hidden");
+  els.threadTitle.textContent = "@" + username; els.groupRenameBtn?.classList.add("is-hidden"); els.groupMembersBtn?.classList.add("is-hidden"); els.groupMembersPopover?.classList.add("is-hidden");
   els.sidebar.classList.add("hide-on-mobile");
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
@@ -437,7 +548,7 @@ async function openGlobal() {
   activeConversation = { type: "global" };
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
-  els.threadTitle.textContent = "🌐 Global Chat"; els.groupRenameBtn?.classList.add("is-hidden");
+  els.threadTitle.textContent = "🌐 Global Chat"; els.groupRenameBtn?.classList.add("is-hidden"); els.groupMembersBtn?.classList.add("is-hidden"); els.groupMembersPopover?.classList.add("is-hidden");
   els.sidebar.classList.add("hide-on-mobile");
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
@@ -487,7 +598,7 @@ function renderBubble(m, isGlobal) {
   const isGroup = activeConversation?.type === "group";
   const avatarOwner = isGlobal || isGroup ? m.sender : activeConversation.username;
   const avatar = !m.mine ? avatarHtml(avatarOwner, avatarUrl, "avatar-sm", true) : "";
-  const nameStyle = isGlobal && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
+  const nameStyle = (isGlobal || isGroup) && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
   const senderLabel =
     (isGlobal || isGroup) && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
   const seen = !isGlobal && m.mine ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>` : "";
@@ -1484,6 +1595,27 @@ document.addEventListener("visibilitychange", reportFocusState);
   socket.on("group-message",m=>{const g=groupCache.get(Number(m.groupId));if(!g||m.sender===me.username)return;g.messages.push(m);g.body=m.body;g.type=m.type;if(isActiveGroup(m.groupId))renderThread();renderConversationList()});
   socket.on("group-message-edited",({groupId,id,body})=>{const g=groupCache.get(Number(groupId));const msg=g?.messages.find(m=>String(m.id)===String(id));if(msg){msg.body=body;msg.edited=true;if(isActiveGroup(groupId))renderThread();}});
   socket.on("group-message-deleted",({groupId,id})=>{if(removeGroupMessage(groupId,id)&&isActiveGroup(groupId))renderThread();});
+  socket.on("group-members-updated", (group) => {
+    const g = groupCache.get(Number(group.id));
+    if (g) g.members = group.members;
+    if (isActiveGroup(group.id)) renderGroupMembersList();
+  });
+  socket.on("group-member-left", ({ groupId, userId, username: leftUsername }) => {
+    if (sameUsername(leftUsername, me.username)) {
+      // We left from another tab/device — drop the group entirely here too.
+      groupCache.delete(Number(groupId));
+      if (isActiveGroup(groupId)) {
+        activeConversation = null;
+        els.threadView.classList.add("is-hidden");
+        els.emptyState.classList.remove("is-hidden");
+      }
+      renderConversationList();
+      return;
+    }
+    const g = groupCache.get(Number(groupId));
+    if (g && g.members) g.members = g.members.filter((m) => m.username !== leftUsername);
+    if (isActiveGroup(groupId)) renderGroupMembersList();
+  });
   socket.on("group-typing",({groupId,username,active})=>noteTyping(`group:${groupId}`,username,active));
 
   socket.on("message", ({ id, from, body, type, reply }) => {
