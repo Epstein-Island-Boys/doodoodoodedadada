@@ -374,7 +374,8 @@ function groupMessages(id){return groupCache.get(Number(id))?.messages||[]}
 function groupPreview(g){return previewFor(g.body||"",g.type||"text")}
 function youtubeIdFromClient(v){try{const u=new URL(v);if(u.hostname==="youtu.be")return u.pathname.slice(1).split("/")[0];if(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com"].includes(u.hostname)){if(u.pathname==="/watch")return u.searchParams.get("v");const m=u.pathname.match(/^\/(shorts|embed)\/([^/?]+)/);return m?.[2]||null}}catch{}return null}
 function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return null;const u=m[0].replace(/[),.!?]+$/g,"");return youtubeIdFromClient(u)?u:null}
-function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
+function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname)||/(^|\.)tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
+function gifDisplayUrl(url){try{const u=new URL(url);if(/(^|\.)tenor\.com$/i.test(u.hostname)||/(^|\.)media\.tenor\.com$/i.test(u.hostname))return `/api/gifs/tenor-proxy?url=${encodeURIComponent(url)}`;}catch{}return url}
 async function loadGroups(){const d=await apiGet("/api/groups");for(const g of d.groups||[])groupCache.set(Number(g.id),{...g,members:[],messages:[]});renderConversationList()}
 async function openGroup(id){id=Number(id);const g=groupCache.get(id);if(!g)return;const d=await apiGet(`/api/groups/${id}`);groupCache.set(id,{...g,...d.group,messages:d.messages||[]});activeConversation={type:"group",id,name:d.group.name};els.emptyState.classList.add("is-hidden");els.threadView.classList.remove("is-hidden");els.threadTitle.textContent=d.group.name;els.groupRenameBtn?.classList.remove("is-hidden");els.sidebar.classList.add("hide-on-mobile");els.main.classList.remove("hide-on-mobile");socketRef?.emit("join-group",id);renderConversationList();renderThread();els.composerInput.focus()}
 function renderLinkedText(raw){
@@ -504,9 +505,9 @@ function renderBubble(m, isGlobal) {
   let bubbleInner;
   const detectedYouTube = m.type === "text" ? extractYouTubeUrl(m.body) : null;
   const detectedGif = m.type === "text" ? extractGifUrl(m.body) : null;
-  if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" />${m.type === "gif" ? `<a class="embed-source-link" href="${escapeHtml(m.body)}" target="_blank" rel="noopener noreferrer">Open GIF</a>` : ""}</div>`;
+  if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.type === "gif" ? gifDisplayUrl(m.body) : m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" />${m.type === "gif" ? `<a class="embed-source-link" href="${escapeHtml(m.body)}" target="_blank" rel="noopener noreferrer">Open GIF</a>` : ""}</div>`;
   else if (m.type === "youtube" || detectedYouTube) { const sourceUrl=m.type === "youtube"?m.body:detectedYouTube; const vid=youtubeIdFromClient(sourceUrl); bubbleInner=`<div class="bubble bubble-embed ${side}">${replyQuote}${vid?`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}" title="YouTube video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe><a class="embed-source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceUrl)}</a>`:renderLinkedText(m.body)}</div>`; }
-  else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(detectedGif)}" alt="GIF" loading="lazy" /><a class="embed-source-link" href="${escapeHtml(detectedGif)}" target="_blank" rel="noopener noreferrer">Open GIF</a></div>`;
+  else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(gifDisplayUrl(detectedGif))}" alt="GIF" loading="lazy" /><a class="embed-source-link" href="${escapeHtml(detectedGif)}" target="_blank" rel="noopener noreferrer">Open GIF</a></div>`;
   else bubbleInner=`<div class="bubble ${side}">${replyQuote}${renderLinkedText(m.body)}</div>`;
 
   return `<div class="bubble-group ${side}" data-id="${m.id ?? ""}">
@@ -903,7 +904,25 @@ function renderTypingIndicator() {
 }
 
 function closeGifPanel(){els.gifPanel?.classList.add("is-hidden")}
-els.gifBtn?.addEventListener("click",()=>{els.gifPanel.classList.toggle("is-hidden");if(!els.gifPanel.classList.contains("is-hidden"))els.gifSearch.focus()});let gifTimer=null;els.gifSearch?.addEventListener("input",()=>{clearTimeout(gifTimer);gifTimer=setTimeout(async()=>{const q=els.gifSearch.value.trim();if(!q){els.gifResults.innerHTML="";return}try{const d=await apiGet(`/api/gifs/search?q=${encodeURIComponent(q)}`);els.gifResults.innerHTML=(d.results||[]).map(x=>`<button type="button" class="gif-result" data-gif-url="${escapeHtml(x.gifUrl)}"><img src="${escapeHtml(x.previewUrl||x.gifUrl)}" alt="GIF" /></button>`).join("")||"No GIFs found."}catch(e){els.gifResults.textContent=e.message}},350)});els.gifResults?.addEventListener("click",async e=>{const b=e.target.closest("[data-gif-url]");if(!b||activeConversation?.type!=="group")return;try{const r=await apiPost("/api/gifs/send",{groupId:activeConversation.id,url:b.dataset.gifUrl});const g=groupCache.get(activeConversation.id);g.messages.push(r.message);g.body="GIF";g.type="gif";closeGifPanel();renderThread();renderConversationList()}catch(err){els.composerError.textContent=err.message}});
+async function sendSelectedGif(url){
+  if(!activeConversation) return;
+  if(activeConversation.type==="group"){
+    const g=groupCache.get(activeConversation.id); if(!g) return;
+    const r=await apiPost("/api/gifs/send",{groupId:activeConversation.id,url});
+    g.messages.push(r.message);g.body="GIF";g.type="gif";renderThread();renderConversationList();return;
+  }
+  if(activeConversation.type==="global"){
+    appendGlobalMessage(me.username,url,true,"gif",{nameColor:me.nameColor,avatarUrl:me.avatarUrl});
+    const r=await apiPost("/api/global/messages",{body:url,type:"gif"});
+    const local=globalMessages?.find(m=>String(m.id)===String(r.message.id)); if(local){local.body=r.message.body;local.type="gif";renderGlobalMessages?.();}
+    return;
+  }
+  const to=activeConversation.username;
+  appendMessage(to,url,true,"gif");bumpConversationPreview(to,"GIF","gif");
+  const r=await apiPost("/api/messages",{to,body:url,type:"gif"});
+  replaceMessageBody(to,url,r.message.body,r.message.id);
+}
+els.gifBtn?.addEventListener("click",()=>{els.gifPanel.classList.toggle("is-hidden");if(!els.gifPanel.classList.contains("is-hidden"))els.gifSearch.focus()});let gifTimer=null;els.gifSearch?.addEventListener("input",()=>{clearTimeout(gifTimer);gifTimer=setTimeout(async()=>{const q=els.gifSearch.value.trim();if(!q){els.gifResults.innerHTML="";return}try{const d=await apiGet(`/api/gifs/search?q=${encodeURIComponent(q)}`);els.gifResults.innerHTML=(d.results||[]).map(x=>`<button type="button" class="gif-result" data-gif-url="${escapeHtml(x.gifUrl)}"><img src="${escapeHtml(gifDisplayUrl(x.previewUrl||x.gifUrl))}" alt="GIF" /></button>`).join("")||"No GIFs found."}catch(e){els.gifResults.textContent=e.message}},350)});els.gifResults?.addEventListener("click",async e=>{const b=e.target.closest("[data-gif-url]");if(!b||!activeConversation)return;try{const url=b.dataset.gifUrl;if(activeConversation.type==="group"){const r=await apiPost("/api/gifs/send",{groupId:activeConversation.id,url});const g=groupCache.get(activeConversation.id);g.messages.push(r.message);g.body="GIF";g.type="gif";closeGifPanel();renderThread();renderConversationList();}else{await sendSelectedGif(url);closeGifPanel();}}catch(err){els.composerError.textContent=err.message}});
 
 // ---- Emoji picker -----------------------------------------------------------
 function renderEmojiGrid(query) {
