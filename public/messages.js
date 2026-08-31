@@ -494,9 +494,9 @@ function renderBubble(m, isGlobal) {
   const editedTag = m.edited ? `<span class="edited-tag">(edited)</span>` : "";
   const replyQuote = renderReplyQuote(m.reply);
 
-  const canManage = m.mine && !isGroup;
+  const canManage = m.mine;
   const canAdminManageGlobal = isGlobal && Boolean(me?.isAdmin);
-  const actions = isGroup ? "" : `<div class="bubble-actions">
+  const actions = `<div class="bubble-actions">
       <button type="button" class="bubble-action-btn" data-action="reply" title="Reply">↩</button>
       ${(canManage || canAdminManageGlobal) && m.type === "text" ? `<button type="button" class="bubble-action-btn" data-action="edit" title="Edit">✎</button>` : ""}
       ${(canManage || canAdminManageGlobal) ? `<button type="button" class="bubble-action-btn" data-action="delete" title="Delete">🗑</button>` : ""}
@@ -602,8 +602,11 @@ els.replyBarCancel.addEventListener("click", cancelReply);
 
 function findMessageById(id) {
   const isGlobal = activeConversation && activeConversation.type === "global";
+  const isGroup = activeConversation && activeConversation.type === "group";
   const list = isGlobal
     ? globalMessages || []
+    : isGroup
+    ? groupMessages(activeConversation.id)
     : activeConversation
     ? threadCache.get(activeConversation.username) || []
     : [];
@@ -634,13 +637,28 @@ function removeGlobalMessage(id) {
   return false;
 }
 
+function removeGroupMessage(groupId, id) {
+  const g = groupCache.get(Number(groupId));
+  if (!g || !g.messages) return false;
+  const idx = g.messages.findIndex((m) => String(m.id) === String(id));
+  if (idx !== -1) {
+    g.messages.splice(idx, 1);
+    return true;
+  }
+  return false;
+}
+
 async function deleteMessage(id) {
   const isGlobal = activeConversation && activeConversation.type === "global";
+  const isGroup = activeConversation && activeConversation.type === "group";
   if (!window.confirm("Unsend this message? It will be removed for everyone.")) return;
   try {
     if (isGlobal) {
       await apiDelete(`/api/global/messages/${id}`);
       removeGlobalMessage(id);
+    } else if (isGroup) {
+      await apiDelete(`/api/groups/${activeConversation.id}/messages/${id}`);
+      removeGroupMessage(activeConversation.id, id);
     } else {
       await apiDelete(`/api/messages/${id}`);
       removeMessageEverywhere(id);
@@ -672,11 +690,14 @@ function startEdit(id) {
 
 async function saveEdit(id, newBody) {
   const isGlobal = activeConversation && activeConversation.type === "global";
+  const isGroup = activeConversation && activeConversation.type === "group";
   const trimmed = newBody.trim();
   if (!trimmed) return;
   try {
     if (isGlobal) {
       await apiPatch(`/api/global/messages/${id}`, { body: trimmed });
+    } else if (isGroup) {
+      await apiPatch(`/api/groups/${activeConversation.id}/messages/${id}`, { body: trimmed });
     } else {
       await apiPatch(`/api/messages/${id}`, { body: trimmed });
     }
@@ -717,9 +738,10 @@ els.thread.addEventListener("click", (e) => {
     const action = actionBtn.dataset.action;
     if (action === "reply") {
       const isGlobal = activeConversation && activeConversation.type === "global";
+      const isGroup = activeConversation && activeConversation.type === "group";
       setReplyBar({
         id: msg.id,
-        sender: msg.mine ? "me" : isGlobal ? msg.sender : activeConversation.username,
+        sender: msg.mine ? "me" : isGlobal || isGroup ? msg.sender : activeConversation.username,
         type: msg.type,
         body: msg.body,
       });
@@ -799,7 +821,28 @@ els.composer.addEventListener("submit", async (e) => {
   const replyPayload = reply ? { id: reply.id, body: reply.body, type: reply.type, sender: reply.sender } : null;
   cancelReply();
 
-  if (activeConversation.type === "group") { const g=groupCache.get(activeConversation.id); if(!g)return; const yt=extractYouTubeUrl(body),gif=extractGifUrl(body),type=yt?"youtube":gif?"gif":"text"; try { const r=type==="gif"?await apiPost("/api/gifs/send",{groupId:activeConversation.id,url:gif}):await apiPost(`/api/groups/${activeConversation.id}/messages`,{body:type==="youtube"?yt:body,type}); g.messages.push(r.message);g.body=r.message.body;g.type=r.message.type;renderThread();renderConversationList(); } catch(e){els.composerError.textContent=e.message} return; }
+  if (activeConversation.type === "group") {
+    const g = groupCache.get(activeConversation.id);
+    if (!g) return;
+    const yt = extractYouTubeUrl(body);
+    const gif = extractGifUrl(body);
+    const type = yt ? "youtube" : gif ? "gif" : "text";
+    try {
+      const r =
+        type === "gif"
+          ? await apiPost("/api/gifs/send", { groupId: activeConversation.id, url: gif, replyTo: reply ? reply.id : undefined })
+          : await apiPost(`/api/groups/${activeConversation.id}/messages`, { body: type === "youtube" ? yt : body, type, replyTo: reply ? reply.id : undefined });
+      g.messages.push(r.message);
+      g.body = r.message.body;
+      g.type = r.message.type;
+      renderThread();
+      renderConversationList();
+    } catch (e) {
+      els.composerError.textContent = e.message;
+    }
+    return;
+  }
+
 
   const yt=extractYouTubeUrl(body), gif=extractGifUrl(body), detectedType=yt?"youtube":gif?"gif":"text";
   if (activeConversation.type === "global") {
@@ -1439,6 +1482,8 @@ document.addEventListener("visibilitychange", reportFocusState);
   socket.on("group-created",g=>{groupCache.set(Number(g.id),{...g,messages:[],body:"",type:"text"});renderConversationList();socket.emit("join-group",g.id)});
   socket.on("group-renamed",({groupId,name})=>{const g=groupCache.get(Number(groupId));if(g)g.name=name;if(isActiveGroup(groupId)){activeConversation.name=name;els.threadTitle.textContent=name}renderConversationList()});
   socket.on("group-message",m=>{const g=groupCache.get(Number(m.groupId));if(!g||m.sender===me.username)return;g.messages.push(m);g.body=m.body;g.type=m.type;if(isActiveGroup(m.groupId))renderThread();renderConversationList()});
+  socket.on("group-message-edited",({groupId,id,body})=>{const g=groupCache.get(Number(groupId));const msg=g?.messages.find(m=>String(m.id)===String(id));if(msg){msg.body=body;msg.edited=true;if(isActiveGroup(groupId))renderThread();}});
+  socket.on("group-message-deleted",({groupId,id})=>{if(removeGroupMessage(groupId,id)&&isActiveGroup(groupId))renderThread();});
   socket.on("group-typing",({groupId,username,active})=>noteTyping(`group:${groupId}`,username,active));
 
   socket.on("message", ({ id, from, body, type, reply }) => {
@@ -1485,6 +1530,16 @@ document.addEventListener("visibilitychange", reportFocusState);
 
   socket.on("global-message-deleted", ({ id }) => {
     if (removeGlobalMessage(id) && activeConversation && activeConversation.type === "global") {
+      renderThread();
+    }
+  });
+
+  // Sent whenever the server auto-trims global chat to free up storage.
+  // Just drop whichever of the pruned ids we happen to have cached/rendered.
+  socket.on("global-messages-pruned", ({ ids }) => {
+    if (!Array.isArray(ids) || !ids.length) return;
+    const anyRemoved = ids.map((id) => removeGlobalMessage(id)).some(Boolean);
+    if (anyRemoved && activeConversation && activeConversation.type === "global") {
       renderThread();
     }
   });

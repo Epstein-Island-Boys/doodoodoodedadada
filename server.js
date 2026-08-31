@@ -154,6 +154,10 @@ async function initDb() {
   await db.execute(`CREATE TABLE IF NOT EXISTS group_members (group_id INTEGER NOT NULL REFERENCES group_chats(id), user_id INTEGER NOT NULL REFERENCES users(id), joined_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(group_id,user_id))`);
   await db.execute(`CREATE TABLE IF NOT EXISTS group_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL REFERENCES group_chats(id), sender_id INTEGER NOT NULL REFERENCES users(id), body TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'text', created_at TEXT NOT NULL DEFAULT (datetime('now')), edited_at TEXT)`);
   await db.execute("CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id,created_at,id)");
+  const groupMsgCols = await db.execute("PRAGMA table_info(group_messages)");
+  if (!groupMsgCols.rows.map((c) => c.name).includes("reply_to_id")) {
+    await db.execute("ALTER TABLE group_messages ADD COLUMN reply_to_id INTEGER");
+  }
 
   // Images now live in Turso too (as blobs), instead of the local /uploads
   // folder, which had the same disappears-on-redeploy problem as the old
@@ -564,14 +568,223 @@ app.post("/api/relations", requireAuth, async (req, res) => {
 });
 
 // ---- Group chats --------------------------------------------------------------
-async function getGroupForUser(groupId, userId) { const r=await db.execute({sql:`SELECT g.id,g.name,g.created_by FROM group_chats g JOIN group_members gm ON gm.group_id=g.id WHERE g.id=? AND gm.user_id=?`,args:[Number(groupId),userId]}); return r.rows[0]||null; }
-async function getGroupMembers(groupId) { const r=await db.execute({sql:`SELECT u.id,u.username,u.name_color,u.avatar_image_id FROM group_members gm JOIN users u ON u.id=gm.user_id WHERE gm.group_id=? ORDER BY u.username COLLATE NOCASE`,args:[Number(groupId)]}); return r.rows.map(x=>({id:Number(x.id),username:x.username,nameColor:x.name_color||null,avatarUrl:avatarUrlFor(x.avatar_image_id)})); }
-async function broadcastGroup(groupId,event,payload){ for(const u of await getGroupMembers(groupId)) for(const sid of onlineSockets.get(u.id)||[]) io.to(sid).emit(event,payload); }
-app.get("/api/groups",requireAuth,async(req,res)=>{const r=await db.execute({sql:`SELECT g.id,g.name,g.created_at,(SELECT body FROM group_messages WHERE group_id=g.id ORDER BY created_at DESC,id DESC LIMIT 1) last_body,(SELECT type FROM group_messages WHERE group_id=g.id ORDER BY created_at DESC,id DESC LIMIT 1) last_type FROM group_chats g JOIN group_members gm ON gm.group_id=g.id WHERE gm.user_id=? ORDER BY g.created_at DESC`,args:[req.session.userId]});res.json({groups:r.rows.map(x=>({id:Number(x.id),name:x.name,created_at:x.created_at,body:x.last_body||"",type:x.last_type||"text"}))});});
-app.post("/api/groups",requireAuth,async(req,res)=>{const names=[...new Set((Array.isArray(req.body?.usernames)?req.body.usernames:[]).map(x=>String(x).trim()).filter(Boolean))].filter(x=>!usernameLower(x)||usernameLower(x)!==usernameLower(req.session.username));if(!names.length)return res.status(400).json({error:"Add at least one other username."});if(names.length>49)return res.status(400).json({error:"Groups can have up to 50 members."});const us=[await getUserByUsername(req.session.username)];for(const n of names){const u=await getUserByUsername(n);if(!u)return res.status(404).json({error:`No user with username ${n}.`});us.push(u);}const name=(typeof req.body?.name==='string'&&req.body.name.trim().slice(0,80))||us.slice(1).map(x=>x.username).join(", ").slice(0,80)||"Group Chat";const info=await db.execute({sql:"INSERT INTO group_chats(name,created_by) VALUES(?,?)",args:[name,req.session.userId]});const id=insertedId(info);for(const u of us)await db.execute({sql:"INSERT INTO group_members(group_id,user_id) VALUES(?,?)",args:[id,u.id]});const g={id,name,members:us.map(u=>({id:Number(u.id),username:u.username,nameColor:u.name_color||null,avatarUrl:avatarUrlFor(u.avatar_image_id)}))};for(const u of us)for(const sid of onlineSockets.get(u.id)||[])io.to(sid).emit("group-created",g);res.json({ok:true,group:g});});
-app.get("/api/groups/:id",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const members=await getGroupMembers(g.id);const r=await db.execute({sql:`SELECT gm.id,gm.body,gm.type,gm.created_at,gm.edited_at,u.username sender,u.name_color,u.avatar_image_id,gm.sender_id FROM group_messages gm JOIN users u ON u.id=gm.sender_id WHERE gm.group_id=? ORDER BY gm.created_at ASC,gm.id ASC LIMIT 300`,args:[g.id]});res.json({group:{id:Number(g.id),name:g.name,members},messages:r.rows.map(x=>({id:Number(x.id),body:x.body,type:x.type,created_at:x.created_at,edited:x.edited_at!=null,sender:x.sender,nameColor:x.name_color||null,avatarUrl:avatarUrlFor(x.avatar_image_id),mine:Number(x.sender_id)===Number(req.session.userId)}))});});
-app.patch("/api/groups/:id",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const name=String(req.body?.name||"").trim();if(!name||name.length>80)return res.status(400).json({error:"Group name must be 1-80 characters."});await db.execute({sql:"UPDATE group_chats SET name=? WHERE id=?",args:[name,g.id]});await broadcastGroup(g.id,"group-renamed",{groupId:Number(g.id),name});res.json({ok:true,groupId:Number(g.id),name});});
-app.post("/api/groups/:id/messages",requireAuth,async(req,res)=>{const g=await getGroupForUser(req.params.id,req.session.userId);if(!g)return res.status(404).json({error:"Group not found."});const body=String(req.body?.body||"").trim(),type=["text","youtube"].includes(req.body?.type)?req.body.type:"text";if(!body||body.length>4000)return res.status(400).json({error:"Message must be 1-4000 characters."});const info=await db.execute({sql:"INSERT INTO group_messages(group_id,sender_id,body,type) VALUES(?,?,?,?)",args:[g.id,req.session.userId,body,type]});const me=await getUserByUsername(req.session.username),cr=await db.execute({sql:"SELECT created_at FROM group_messages WHERE id=?",args:[insertedId(info)]});const p={id:insertedId(info),groupId:Number(g.id),sender:me.username,nameColor:me.name_color||null,avatarUrl:avatarUrlFor(me.avatar_image_id),body,type,created_at:cr.rows[0].created_at,mine:true};await broadcastGroup(g.id,"group-message",p);res.json({ok:true,message:p});});
+// A group is a name + a set of members; messages work like the global room
+// but scoped to that member list. Rewritten for readability and to bring
+// group messages up to parity with DMs/global chat (reply, edit, delete),
+// which the old version was missing entirely.
+
+async function getGroupForUser(groupId, userId) {
+  const r = await db.execute({
+    sql: `SELECT g.id, g.name, g.created_by FROM group_chats g
+          JOIN group_members gm ON gm.group_id = g.id
+          WHERE g.id = ? AND gm.user_id = ?`,
+    args: [Number(groupId), userId],
+  });
+  return r.rows[0] || null;
+}
+
+async function getGroupMembers(groupId) {
+  const r = await db.execute({
+    sql: `SELECT u.id, u.username, u.name_color, u.avatar_image_id
+          FROM group_members gm JOIN users u ON u.id = gm.user_id
+          WHERE gm.group_id = ? ORDER BY u.username COLLATE NOCASE`,
+    args: [Number(groupId)],
+  });
+  return r.rows.map((x) => ({
+    id: Number(x.id),
+    username: x.username,
+    nameColor: x.name_color || null,
+    avatarUrl: avatarUrlFor(x.avatar_image_id),
+  }));
+}
+
+async function broadcastGroup(groupId, event, payload) {
+  for (const u of await getGroupMembers(groupId)) {
+    for (const sid of onlineSockets.get(u.id) || []) io.to(sid).emit(event, payload);
+  }
+}
+
+app.get("/api/groups", requireAuth, async (req, res) => {
+  const r = await db.execute({
+    sql: `SELECT g.id, g.name, g.created_at,
+                 (SELECT body FROM group_messages WHERE group_id = g.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_body,
+                 (SELECT type FROM group_messages WHERE group_id = g.id ORDER BY created_at DESC, id DESC LIMIT 1) AS last_type
+          FROM group_chats g JOIN group_members gm ON gm.group_id = g.id
+          WHERE gm.user_id = ? ORDER BY g.created_at DESC`,
+    args: [req.session.userId],
+  });
+  res.json({
+    groups: r.rows.map((x) => ({
+      id: Number(x.id),
+      name: x.name,
+      created_at: x.created_at,
+      body: x.last_body || "",
+      type: x.last_type || "text",
+    })),
+  });
+});
+
+app.post("/api/groups", requireAuth, async (req, res) => {
+  const requested = Array.isArray(req.body?.usernames) ? req.body.usernames : [];
+  const names = [...new Set(requested.map((x) => String(x).trim()).filter(Boolean))].filter(
+    (x) => usernameLower(x) !== usernameLower(req.session.username)
+  );
+  if (!names.length) return res.status(400).json({ error: "Add at least one other username." });
+  if (names.length > 49) return res.status(400).json({ error: "Groups can have up to 50 members." });
+
+  const members = [await getUserByUsername(req.session.username)];
+  for (const n of names) {
+    const u = await getUserByUsername(n);
+    if (!u) return res.status(404).json({ error: `No user with username ${n}.` });
+    members.push(u);
+  }
+
+  const requestedName = typeof req.body?.name === "string" ? req.body.name.trim().slice(0, 80) : "";
+  const name = requestedName || members.slice(1).map((u) => u.username).join(", ").slice(0, 80) || "Group Chat";
+
+  const info = await db.execute({ sql: "INSERT INTO group_chats (name, created_by) VALUES (?, ?)", args: [name, req.session.userId] });
+  const id = insertedId(info);
+  for (const u of members) {
+    await db.execute({ sql: "INSERT INTO group_members (group_id, user_id) VALUES (?, ?)", args: [id, u.id] });
+  }
+
+  const group = {
+    id,
+    name,
+    members: members.map((u) => ({ id: Number(u.id), username: u.username, nameColor: u.name_color || null, avatarUrl: avatarUrlFor(u.avatar_image_id) })),
+  };
+  for (const u of members) {
+    for (const sid of onlineSockets.get(u.id) || []) io.to(sid).emit("group-created", group);
+  }
+  res.json({ ok: true, group });
+});
+
+app.get("/api/groups/:id", requireAuth, async (req, res) => {
+  const g = await getGroupForUser(req.params.id, req.session.userId);
+  if (!g) return res.status(404).json({ error: "Group not found." });
+  const members = await getGroupMembers(g.id);
+
+  const r = await db.execute({
+    sql: `SELECT gm.id, gm.body, gm.type, gm.created_at, gm.edited_at, gm.reply_to_id, gm.sender_id,
+                 u.username AS sender, u.name_color, u.avatar_image_id,
+                 rg.id AS reply_row_id, rg.body AS reply_body, rg.type AS reply_type, ru.username AS reply_sender
+          FROM group_messages gm
+          JOIN users u ON u.id = gm.sender_id
+          LEFT JOIN group_messages rg ON rg.id = gm.reply_to_id
+          LEFT JOIN users ru ON ru.id = rg.sender_id
+          WHERE gm.group_id = ? ORDER BY gm.created_at ASC, gm.id ASC LIMIT 300`,
+    args: [g.id],
+  });
+
+  res.json({
+    group: { id: Number(g.id), name: g.name, members },
+    messages: r.rows.map((x) => ({
+      id: Number(x.id),
+      body: x.body,
+      type: x.type,
+      created_at: x.created_at,
+      edited: x.edited_at != null,
+      sender: x.sender,
+      nameColor: x.name_color || null,
+      avatarUrl: avatarUrlFor(x.avatar_image_id),
+      mine: Number(x.sender_id) === Number(req.session.userId),
+      reply: x.reply_to_id
+        ? x.reply_row_id == null
+          ? { removed: true }
+          : { id: x.reply_row_id, body: x.reply_body, type: x.reply_type, sender: x.reply_sender }
+        : null,
+    })),
+  });
+});
+
+app.patch("/api/groups/:id", requireAuth, async (req, res) => {
+  const g = await getGroupForUser(req.params.id, req.session.userId);
+  if (!g) return res.status(404).json({ error: "Group not found." });
+  const name = String(req.body?.name || "").trim();
+  if (!name || name.length > 80) return res.status(400).json({ error: "Group name must be 1-80 characters." });
+  await db.execute({ sql: "UPDATE group_chats SET name = ? WHERE id = ?", args: [name, g.id] });
+  await broadcastGroup(g.id, "group-renamed", { groupId: Number(g.id), name });
+  res.json({ ok: true, groupId: Number(g.id), name });
+});
+
+app.post("/api/groups/:id/messages", requireAuth, async (req, res) => {
+  const g = await getGroupForUser(req.params.id, req.session.userId);
+  if (!g) return res.status(404).json({ error: "Group not found." });
+
+  const body = String(req.body?.body || "").trim();
+  const type = ["text", "youtube", "gif"].includes(req.body?.type) ? req.body.type : "text";
+  if (!body || body.length > 4000) return res.status(400).json({ error: "Message must be 1-4000 characters." });
+
+  let replyToId = null;
+  let replyPreview = null;
+  if (req.body?.replyTo != null) {
+    const replyResult = await db.execute({
+      sql: `SELECT gm.id, gm.body, gm.type, u.username AS sender
+            FROM group_messages gm JOIN users u ON u.id = gm.sender_id
+            WHERE gm.id = ? AND gm.group_id = ?`,
+      args: [Number(req.body.replyTo), g.id],
+    });
+    const replied = replyResult.rows[0];
+    if (replied) {
+      replyToId = replied.id;
+      replyPreview = { id: replied.id, body: replied.body, type: replied.type, sender: replied.sender };
+    }
+  }
+
+  const info = await db.execute({
+    sql: "INSERT INTO group_messages (group_id, sender_id, body, type, reply_to_id) VALUES (?, ?, ?, ?, ?)",
+    args: [g.id, req.session.userId, body, type, replyToId],
+  });
+  const me = await getUserByUsername(req.session.username);
+  const cr = await db.execute({ sql: "SELECT created_at FROM group_messages WHERE id = ?", args: [insertedId(info)] });
+
+  const payload = {
+    id: insertedId(info),
+    groupId: Number(g.id),
+    sender: me.username,
+    nameColor: me.name_color || null,
+    avatarUrl: avatarUrlFor(me.avatar_image_id),
+    body,
+    type,
+    created_at: cr.rows[0].created_at,
+    reply: replyPreview,
+    mine: true,
+  };
+  await broadcastGroup(g.id, "group-message", payload);
+  res.json({ ok: true, message: payload });
+});
+
+app.patch("/api/groups/:id/messages/:mid", requireAuth, async (req, res) => {
+  const g = await getGroupForUser(req.params.id, req.session.userId);
+  if (!g) return res.status(404).json({ error: "Group not found." });
+  const mid = Number(req.params.mid);
+  const body = String(req.body?.body || "").trim();
+  if (!body || body.length > 4000) return res.status(400).json({ error: "Message must be 1-4000 characters." });
+
+  const row = await db.execute({ sql: "SELECT id, sender_id, type FROM group_messages WHERE id = ? AND group_id = ?", args: [mid, g.id] });
+  const msg = row.rows[0];
+  if (!msg || msg.sender_id !== req.session.userId) return res.status(404).json({ error: "Message not found." });
+  if (msg.type !== "text") return res.status(400).json({ error: "Only text messages can be edited." });
+
+  await db.execute({ sql: "UPDATE group_messages SET body = ?, edited_at = datetime('now') WHERE id = ?", args: [body, mid] });
+  await broadcastGroup(g.id, "group-message-edited", { groupId: Number(g.id), id: mid, body });
+  res.json({ ok: true, message: { id: mid, body } });
+});
+
+app.delete("/api/groups/:id/messages/:mid", requireAuth, async (req, res) => {
+  const g = await getGroupForUser(req.params.id, req.session.userId);
+  if (!g) return res.status(404).json({ error: "Group not found." });
+  const mid = Number(req.params.mid);
+
+  const row = await db.execute({ sql: "SELECT id, sender_id FROM group_messages WHERE id = ? AND group_id = ?", args: [mid, g.id] });
+  const msg = row.rows[0];
+  if (!msg || msg.sender_id !== req.session.userId) return res.status(404).json({ error: "Message not found." });
+
+  await db.execute({ sql: "DELETE FROM group_messages WHERE id = ?", args: [mid] });
+  await broadcastGroup(g.id, "group-message-deleted", { groupId: Number(g.id), id: mid });
+  res.json({ ok: true, id: mid });
+});
+
 // GIF search / proxy -----------------------------------------------------------
 // Tenor's public API was shut down on June 30, 2026.  Keep Tenor support by
 // using the public Tenor search/view pages server-side, so clients never need
@@ -1003,6 +1216,50 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
 // a public space everyone in it can see in full.
 const GLOBAL_HISTORY_LIMIT = 200;
 
+// How many global messages we keep in the database at once. Every time
+// someone posts, we trim the room back down to this count by deleting the
+// oldest messages first — that's what keeps global chat from ever filling
+// up storage again. (Images are the expensive part, since their bytes live
+// in the `images` table, so when a pruned message was an image we delete
+// that row too instead of leaving an orphaned blob behind.)
+const MAX_GLOBAL_MESSAGES = 500;
+
+async function pruneGlobalMessages() {
+  // Find the ids of any messages beyond the newest MAX_GLOBAL_MESSAGES.
+  const overflow = await db.execute({
+    sql: `SELECT id, type, body FROM global_messages
+          ORDER BY created_at DESC, id DESC
+          LIMIT -1 OFFSET ?`,
+    args: [MAX_GLOBAL_MESSAGES],
+  });
+  if (overflow.rows.length === 0) return;
+
+  const idsToDelete = overflow.rows.map((r) => r.id);
+  const imageIdsToDelete = overflow.rows
+    .filter((r) => r.type === "image" && typeof r.body === "string")
+    .map((r) => r.body.match(/\/api\/images\/(\d+)/))
+    .filter(Boolean)
+    .map((m) => Number(m[1]));
+
+  // Any reply pointing at a message we're about to delete should just show
+  // "message removed" instead of a dangling foreign id.
+  const placeholders = idsToDelete.map(() => "?").join(",");
+  await db.execute({
+    sql: `DELETE FROM global_messages WHERE id IN (${placeholders})`,
+    args: idsToDelete,
+  });
+
+  if (imageIdsToDelete.length) {
+    const imgPlaceholders = imageIdsToDelete.map(() => "?").join(",");
+    await db.execute({
+      sql: `DELETE FROM images WHERE id IN (${imgPlaceholders})`,
+      args: imageIdsToDelete,
+    });
+  }
+
+  broadcastGlobalAll("global-messages-pruned", { ids: idsToDelete });
+}
+
 app.get("/api/global/messages", requireAuth, async (req, res) => {
   const result = await db.execute({
     sql: `SELECT g.id, g.sender_id, u.username AS sender, u.name_color, u.avatar_image_id,
@@ -1108,6 +1365,7 @@ app.post("/api/global/messages", requireAuth, async (req, res) => {
   };
   broadcastGlobal(payload, myId);
   res.json({ ok: true, message: payload });
+  pruneGlobalMessages().catch((e) => console.error("prune (global text) failed:", e));
 });
 
 // ---- Edit / unsend a global message -------------------------------------------
@@ -1222,6 +1480,7 @@ app.post("/api/global/messages/image", requireAuth, (req, res) => {
       };
       broadcastGlobal(payload, myId);
       res.json({ ok: true, message: payload });
+      pruneGlobalMessages().catch((e) => console.error("prune (global image) failed:", e));
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: "Upload failed." });
@@ -1328,8 +1587,17 @@ io.on("connection", (socket) => {
   socketFocus.set(socket.id, true);
   broadcastPresence(username, true);
 
-  socket.on("join-group", async (groupId) => { if (await getGroupForUser(groupId, userId)) socket.join(`group:${Number(groupId)}`); });
-  socket.on("group-typing", async ({ groupId, active }) => { const g=await getGroupForUser(groupId,userId); if(!g)return; for(const u of await getGroupMembers(g.id)){if(u.id===userId)continue;for(const sid of onlineSockets.get(u.id)||[])io.to(sid).emit("group-typing",{groupId:Number(g.id),username,active:!!active});} });
+  socket.on("join-group", async (groupId) => {
+    if (await getGroupForUser(groupId, userId)) socket.join(`group:${Number(groupId)}`);
+  });
+  socket.on("group-typing", async ({ groupId, active }) => {
+    const g = await getGroupForUser(groupId, userId);
+    if (!g) return;
+    for (const u of await getGroupMembers(g.id)) {
+      if (u.id === userId) continue;
+      for (const sid of onlineSockets.get(u.id) || []) io.to(sid).emit("group-typing", { groupId: Number(g.id), username, active: !!active });
+    }
+  });
 
   socket.on("focus-state", ({ focused }) => {
     const wasActive = isUserActive(userId);
@@ -1368,6 +1636,7 @@ io.on("connection", (socket) => {
 });
 
 initDb()
+  .then(() => pruneGlobalMessages())
   .then(() => {
     server.listen(PORT, () => {
       console.log(`Server running at http://localhost:${PORT}`);
