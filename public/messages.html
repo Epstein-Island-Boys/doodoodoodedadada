@@ -98,7 +98,13 @@
           <div class="composer-tools">
             <button type="button" class="tool-btn" id="emoji-btn" aria-label="Insert emoji" aria-haspopup="true">🙂</button>
             <button type="button" class="tool-btn" id="image-btn" aria-label="Send an image">📷</button><button type="button" class="tool-btn" id="gif-btn" aria-label="Search GIFs">GIF</button>
+            <button type="button" class="tool-btn" id="plus-btn" aria-label="More options" aria-haspopup="true">+</button>
             <input type="file" id="image-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+          </div>
+          <div class="plus-menu is-hidden" id="plus-menu">
+            <button type="button" id="plus-voice">🎤 Record a voice message</button>
+            <button type="button" id="plus-photo">📸 Take a photo</button>
+            <button type="button" id="plus-video">🎥 Record a video</button>
           </div>
           <input id="composer-input" placeholder="Write a message…" autocomplete="off" maxlength="2000" />
           <button type="submit">Send</button>
@@ -130,6 +136,58 @@
   <div class="lightbox is-hidden" id="lightbox">
     <button type="button" class="lightbox-close" id="lightbox-close" aria-label="Close">✕</button>
     <img id="lightbox-img" src="" alt="Full-size image" />
+  </div>
+
+  <!-- Camera modal: take a selfie photo or record a selfie video, then send it. -->
+  <div class="modal-overlay is-hidden" id="camera-overlay">
+    <div class="modal camera-modal" id="camera-modal" role="dialog" aria-modal="true" aria-label="Camera">
+      <div class="modal-header">
+        <h2 id="camera-modal-title">Take a photo</h2>
+        <button type="button" class="icon-btn" id="camera-close" aria-label="Close camera">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="camera-stage" id="camera-stage">
+          <video id="camera-video" autoplay playsinline muted></video>
+          <img id="camera-photo-preview" class="is-hidden" alt="Captured photo" />
+          <video id="camera-video-preview" class="is-hidden" playsinline controls></video>
+          <canvas id="camera-canvas" class="is-hidden"></canvas>
+          <div class="rec-indicator is-hidden" id="camera-rec-indicator"><span class="rec-dot"></span><span id="camera-rec-timer">0:00</span></div>
+        </div>
+        <p class="settings-error" id="camera-error"></p>
+        <div class="camera-controls" id="camera-controls">
+          <button type="button" class="btn" id="camera-shutter">Take photo</button>
+        </div>
+        <div class="camera-controls is-hidden" id="camera-review-controls">
+          <button type="button" class="link-btn" id="camera-retake">Retake</button>
+          <button type="button" class="btn" id="camera-send">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Voice modal: record a voice message, preview it, then send it. -->
+  <div class="modal-overlay is-hidden" id="voice-overlay">
+    <div class="modal voice-modal" id="voice-modal" role="dialog" aria-modal="true" aria-label="Record voice message">
+      <div class="modal-header">
+        <h2>Record a voice message</h2>
+        <button type="button" class="icon-btn" id="voice-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="voice-stage" id="voice-stage">
+          <div class="voice-mic-icon" id="voice-mic-icon">🎤</div>
+          <div class="rec-indicator is-hidden" id="voice-rec-indicator"><span class="rec-dot"></span><span id="voice-rec-timer">0:00</span></div>
+          <audio id="voice-preview" class="is-hidden" controls></audio>
+        </div>
+        <p class="settings-error" id="voice-error"></p>
+        <div class="camera-controls" id="voice-controls">
+          <button type="button" class="btn" id="voice-record-btn">Start recording</button>
+        </div>
+        <div class="camera-controls is-hidden" id="voice-review-controls">
+          <button type="button" class="link-btn" id="voice-retake">Discard</button>
+          <button type="button" class="btn" id="voice-send">Send</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Settings modal -->

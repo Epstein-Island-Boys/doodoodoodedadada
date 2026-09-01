@@ -911,6 +911,18 @@ h1 {
   cursor: zoom-in;
 }
 
+.bubble-audio audio {
+  display: block;
+  width: min(280px, 100%);
+}
+
+.bubble-video video {
+  display: block;
+  max-width: min(280px, 100%);
+  max-height: 320px;
+  border-radius: 10px;
+}
+
 .composer {
   position: relative;
   display: flex;
@@ -1035,6 +1047,145 @@ h1 {
   color: var(--bark);
   font-size: 0.8rem;
   padding: 16px 0;
+}
+
+/* ---------- "+" composer menu (voice / camera photo / camera video) ---------- */
+
+.plus-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 24px;
+  min-width: 230px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(30, 35, 23, 0.18);
+  overflow: hidden;
+  z-index: 20;
+}
+
+.plus-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 11px 14px;
+  border: none;
+  background: none;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.plus-menu button:hover {
+  background: rgba(140, 163, 122, 0.15);
+}
+
+.plus-menu button:not(:last-child) {
+  border-bottom: 1px solid var(--line);
+}
+
+/* ---------- Camera / voice recording modals ---------- */
+
+.camera-modal,
+.voice-modal {
+  max-width: 420px;
+}
+
+.camera-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  max-height: 55vh;
+  background: #14150f;
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-stage video,
+.camera-stage img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transform: scaleX(-1); /* mirror, like a selfie cam */
+}
+
+.camera-stage video.no-mirror { transform: none; }
+
+/* The live feed is mirrored for a natural selfie-cam feel, but the captured
+   photo/video should show true-to-file (not flipped), since that's what
+   gets sent and how everyone else will see it. */
+#camera-photo-preview,
+#camera-video-preview {
+  transform: none;
+}
+
+.rec-indicator {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  padding: 4px 10px 4px 8px;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-family: var(--mono);
+}
+
+.rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d9453b;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.camera-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.voice-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 36px 0 26px;
+}
+
+.voice-mic-icon {
+  font-size: 2.4rem;
+  line-height: 1;
+}
+
+.voice-stage .rec-indicator {
+  position: static;
+  background: rgba(140, 163, 122, 0.15);
+  color: var(--ink);
+}
+
+.voice-stage audio {
+  width: 100%;
 }
 
 @media (max-width: 720px) {

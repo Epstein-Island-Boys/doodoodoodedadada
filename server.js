@@ -286,6 +286,34 @@ const upload = multer({
   },
 });
 
+// Voice messages, recorded in-browser with MediaRecorder. Kept well under
+// the video limit below since these are meant to be quick clips, not long
+// recordings.
+const ALLOWED_AUDIO_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav"]);
+const uploadAudio = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_AUDIO_TYPES.has(file.mimetype)) {
+      return cb(new Error("That audio format isn't supported."));
+    }
+    cb(null, true);
+  },
+});
+
+// Selfie-cam video clips, also recorded in-browser with MediaRecorder.
+const ALLOWED_VIDEO_TYPES = new Set(["video/webm", "video/mp4"]);
+const uploadVideo = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_VIDEO_TYPES.has(file.mimetype)) {
+      return cb(new Error("That video format isn't supported."));
+    }
+    cb(null, true);
+  },
+});
+
 // ---- Sessions ---------------------------------------------------------------
 // Kept in its own variable so the same middleware instance can also run
 // on socket.io connections below — that's what lets a socket see who's
@@ -1048,6 +1076,130 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
   });
 });
 
+// Shared by the audio/video DM, group, and global routes below — stores the
+// recorded clip as a BLOB the same way `/api/messages/image` stores photos
+// (see the `images` table above, which is generic enough to hold any
+// mime-typed blob), and hands back the URL to reference it from a message
+// row. Served back out through /api/media/:id rather than /api/images/:id
+// so a voice or video message URL doesn't read like a photo.
+async function storeMediaBlob(mimeType, buffer, uploaderId) {
+  const info = await db.execute({
+    sql: "INSERT INTO images (mime_type, data, uploaded_by) VALUES (?, ?, ?)",
+    args: [mimeType, buffer, uploaderId],
+  });
+  return "/api/media/" + insertedId(info);
+}
+
+// ---- Send a voice message ------------------------------------------------
+app.post("/api/messages/audio", requireAuth, (req, res) => {
+  uploadAudio.single("audio")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No recording provided." });
+
+    try {
+      const myId = req.session.userId;
+      const to = (req.body && req.body.to) || "";
+      if (usernameLower(to) === usernameLower(req.session.username)) {
+        return res.status(400).json({ error: "You can't message yourself." });
+      }
+
+      const recipient = await getUserByUsername(to);
+      if (!recipient) return res.status(404).json({ error: "No user with that username." });
+
+      const theirRelationToMe = await getRelation(recipient.id, myId);
+      if (theirRelationToMe === "blocked") {
+        return res.status(403).json({ error: "You can't message this user." });
+      }
+
+      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+
+      const info = await db.execute({
+        sql: "INSERT INTO messages (sender_id, recipient_id, body, type) VALUES (?, ?, ?, 'audio')",
+        args: [myId, recipient.id, url],
+      });
+      await clearConversationHides(myId, recipient.id);
+      const createdResult = await db.execute({
+        sql: "SELECT created_at FROM messages WHERE id = ?",
+        args: [insertedId(info)],
+      });
+      const created_at = createdResult.rows[0].created_at;
+
+      const payload = {
+        id: insertedId(info),
+        from: req.session.username,
+        to: recipient.username,
+        body: url,
+        type: "audio",
+        created_at,
+        reply: null,
+      };
+      for (const socketId of onlineSockets.get(recipient.id) || []) {
+        io.to(socketId).emit("message", payload);
+      }
+
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
+// ---- Send a selfie-cam video message -----------------------------------------
+app.post("/api/messages/video", requireAuth, (req, res) => {
+  uploadVideo.single("video")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No recording provided." });
+
+    try {
+      const myId = req.session.userId;
+      const to = (req.body && req.body.to) || "";
+      if (usernameLower(to) === usernameLower(req.session.username)) {
+        return res.status(400).json({ error: "You can't message yourself." });
+      }
+
+      const recipient = await getUserByUsername(to);
+      if (!recipient) return res.status(404).json({ error: "No user with that username." });
+
+      const theirRelationToMe = await getRelation(recipient.id, myId);
+      if (theirRelationToMe === "blocked") {
+        return res.status(403).json({ error: "You can't message this user." });
+      }
+
+      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+
+      const info = await db.execute({
+        sql: "INSERT INTO messages (sender_id, recipient_id, body, type) VALUES (?, ?, ?, 'video')",
+        args: [myId, recipient.id, url],
+      });
+      await clearConversationHides(myId, recipient.id);
+      const createdResult = await db.execute({
+        sql: "SELECT created_at FROM messages WHERE id = ?",
+        args: [insertedId(info)],
+      });
+      const created_at = createdResult.rows[0].created_at;
+
+      const payload = {
+        id: insertedId(info),
+        from: req.session.username,
+        to: recipient.username,
+        body: url,
+        type: "video",
+        created_at,
+        reply: null,
+      };
+      for (const socketId of onlineSockets.get(recipient.id) || []) {
+        io.to(socketId).emit("message", payload);
+      }
+
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
 // ---- Group chats ----------------------------------------------------------
 async function isGroupMember(groupId, userId) {
   if (!Number.isInteger(groupId)) return false;
@@ -1520,6 +1672,84 @@ app.post("/api/groups/:id/messages/image", requireAuth, (req, res) => {
   });
 });
 
+app.post("/api/groups/:id/messages/audio", requireAuth, (req, res) => {
+  uploadAudio.single("audio")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No recording provided." });
+
+    const groupId = Number(req.params.id);
+    const myId = req.session.userId;
+    try {
+      if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+
+      const info = await db.execute({
+        sql: "INSERT INTO group_messages (group_id, sender_id, body, type) VALUES (?, ?, ?, 'audio')",
+        args: [groupId, myId, url],
+      });
+      const createdResult = await db.execute({ sql: "SELECT created_at FROM group_messages WHERE id = ?", args: [insertedId(info)] });
+      const meRow = await getUserByUsername(req.session.username);
+
+      const payload = {
+        groupId,
+        id: insertedId(info),
+        sender: req.session.username,
+        nameColor: meRow?.name_color || null,
+        avatarUrl: avatarUrlFor(meRow?.avatar_image_id),
+        body: url,
+        type: "audio",
+        created_at: createdResult.rows[0].created_at,
+        reply: null,
+      };
+      await broadcastToGroup(groupId, "group-message", payload, myId);
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
+app.post("/api/groups/:id/messages/video", requireAuth, (req, res) => {
+  uploadVideo.single("video")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No recording provided." });
+
+    const groupId = Number(req.params.id);
+    const myId = req.session.userId;
+    try {
+      if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+
+      const info = await db.execute({
+        sql: "INSERT INTO group_messages (group_id, sender_id, body, type) VALUES (?, ?, ?, 'video')",
+        args: [groupId, myId, url],
+      });
+      const createdResult = await db.execute({ sql: "SELECT created_at FROM group_messages WHERE id = ?", args: [insertedId(info)] });
+      const meRow = await getUserByUsername(req.session.username);
+
+      const payload = {
+        groupId,
+        id: insertedId(info),
+        sender: req.session.username,
+        nameColor: meRow?.name_color || null,
+        avatarUrl: avatarUrlFor(meRow?.avatar_image_id),
+        body: url,
+        type: "video",
+        created_at: createdResult.rows[0].created_at,
+        reply: null,
+      };
+      await broadcastToGroup(groupId, "group-message", payload, myId);
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
 // ---- Global chat --------------------------------------------------------------
 // One shared room everyone can post to and read. No block/mute filtering here
 // on purpose — those only govern DMs and DM notifications; the global room is
@@ -1876,6 +2106,113 @@ app.post("/api/global/messages/image", requireAuth, (req, res) => {
       res.status(500).json({ error: "Upload failed." });
     }
   });
+});
+
+app.post("/api/global/messages/audio", requireAuth, (req, res) => {
+  uploadAudio.single("audio")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No recording provided." });
+
+    try {
+      const myId = req.session.userId;
+      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+
+      const info = await db.execute({
+        sql: "INSERT INTO global_messages (sender_id, body, type) VALUES (?, ?, 'audio')",
+        args: [myId, url],
+      });
+      const createdResult = await db.execute({
+        sql: "SELECT created_at FROM global_messages WHERE id = ?",
+        args: [insertedId(info)],
+      });
+
+      const meResult = await db.execute({
+        sql: "SELECT name_color, avatar_image_id FROM users WHERE id = ?",
+        args: [myId],
+      });
+      const me = meResult.rows[0] || {};
+
+      const payload = {
+        id: insertedId(info),
+        sender: req.session.username,
+        nameColor: me.name_color || null,
+        avatarUrl: avatarUrlFor(me.avatar_image_id),
+        body: url,
+        type: "audio",
+        created_at: createdResult.rows[0].created_at,
+        reply: null,
+      };
+      broadcastGlobal(payload, myId);
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
+app.post("/api/global/messages/video", requireAuth, (req, res) => {
+  uploadVideo.single("video")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No recording provided." });
+
+    try {
+      const myId = req.session.userId;
+      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+
+      const info = await db.execute({
+        sql: "INSERT INTO global_messages (sender_id, body, type) VALUES (?, ?, 'video')",
+        args: [myId, url],
+      });
+      const createdResult = await db.execute({
+        sql: "SELECT created_at FROM global_messages WHERE id = ?",
+        args: [insertedId(info)],
+      });
+
+      const meResult = await db.execute({
+        sql: "SELECT name_color, avatar_image_id FROM users WHERE id = ?",
+        args: [myId],
+      });
+      const me = meResult.rows[0] || {};
+
+      const payload = {
+        id: insertedId(info),
+        sender: req.session.username,
+        nameColor: me.name_color || null,
+        avatarUrl: avatarUrlFor(me.avatar_image_id),
+        body: url,
+        type: "video",
+        created_at: createdResult.rows[0].created_at,
+        reply: null,
+      };
+      broadcastGlobal(payload, myId);
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
+// ---- Serve a voice/video clip back out of Turso -------------------------------
+// Same shape and reasoning as the image route below — no auth gate, since an
+// <audio>/<video> tag's src request can't carry the app's session-aware
+// fetch headers.
+app.get("/api/media/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(404).end();
+
+  const result = await db.execute({
+    sql: "SELECT mime_type, data FROM images WHERE id = ?",
+    args: [id],
+  });
+  const row = result.rows[0];
+  if (!row) return res.status(404).end();
+
+  res.set("Content-Type", row.mime_type);
+  res.set("Accept-Ranges", "bytes");
+  res.set("Cache-Control", "private, max-age=31536000, immutable");
+  res.send(Buffer.from(row.data));
 });
 
 // ---- Serve an image back out of Turso ----------------------------------------

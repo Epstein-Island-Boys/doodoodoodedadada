@@ -266,6 +266,42 @@ const els = {
   adminModeStatus: document.getElementById("admin-mode-status"),
   relationsList: document.getElementById("relations-list"),
   logoutBtn: document.getElementById("logout-btn"),
+
+  plusBtn: document.getElementById("plus-btn"),
+  plusMenu: document.getElementById("plus-menu"),
+  plusVoice: document.getElementById("plus-voice"),
+  plusPhoto: document.getElementById("plus-photo"),
+  plusVideo: document.getElementById("plus-video"),
+
+  cameraOverlay: document.getElementById("camera-overlay"),
+  cameraModalTitle: document.getElementById("camera-modal-title"),
+  cameraClose: document.getElementById("camera-close"),
+  cameraStage: document.getElementById("camera-stage"),
+  cameraVideo: document.getElementById("camera-video"),
+  cameraPhotoPreview: document.getElementById("camera-photo-preview"),
+  cameraVideoPreview: document.getElementById("camera-video-preview"),
+  cameraCanvas: document.getElementById("camera-canvas"),
+  cameraRecIndicator: document.getElementById("camera-rec-indicator"),
+  cameraRecTimer: document.getElementById("camera-rec-timer"),
+  cameraError: document.getElementById("camera-error"),
+  cameraControls: document.getElementById("camera-controls"),
+  cameraShutter: document.getElementById("camera-shutter"),
+  cameraReviewControls: document.getElementById("camera-review-controls"),
+  cameraRetake: document.getElementById("camera-retake"),
+  cameraSend: document.getElementById("camera-send"),
+
+  voiceOverlay: document.getElementById("voice-overlay"),
+  voiceClose: document.getElementById("voice-close"),
+  voiceMicIcon: document.getElementById("voice-mic-icon"),
+  voiceRecIndicator: document.getElementById("voice-rec-indicator"),
+  voiceRecTimer: document.getElementById("voice-rec-timer"),
+  voicePreview: document.getElementById("voice-preview"),
+  voiceError: document.getElementById("voice-error"),
+  voiceControls: document.getElementById("voice-controls"),
+  voiceRecordBtn: document.getElementById("voice-record-btn"),
+  voiceReviewControls: document.getElementById("voice-review-controls"),
+  voiceRetake: document.getElementById("voice-retake"),
+  voiceSend: document.getElementById("voice-send"),
 };
 
 els.thread.addEventListener("scroll", handleThreadScroll);
@@ -281,7 +317,10 @@ function escapeHtml(str) {
 }
 
 function previewFor(body, type) {
-  return type === "image" ? "📷 Photo" : body;
+  if (type === "image") return "📷 Photo";
+  if (type === "audio") return "🎤 Voice message";
+  if (type === "video") return "🎥 Video";
+  return body;
 }
 
 function isActiveDm(username) {
@@ -834,7 +873,7 @@ async function markGroupRead(groupId) {
 function replySnippetText(reply) {
   if (!reply) return "";
   if (reply.removed) return "Original message removed";
-  return reply.type === "image" ? "📷 Photo" : reply.body;
+  return previewFor(reply.body, reply.type);
 }
 
 function renderReplyQuote(reply) {
@@ -922,6 +961,8 @@ function renderBubble(m, kind) {
   const detectedYouTube = m.type === "text" ? extractYouTubeUrl(m.body) : null;
   const detectedGif = m.type === "text" ? extractGifUrl(m.body) : null;
   if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.type === "gif" ? gifDisplayUrl(m.body) : m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" />${m.type === "gif" ? `<a class="embed-source-link" href="${escapeHtml(m.body)}" target="_blank" rel="noopener noreferrer">Open GIF</a>` : ""}</div>`;
+  else if (m.type === "audio") bubbleInner = `<div class="bubble bubble-audio ${side}">${replyQuote}<audio controls preload="metadata" src="${escapeHtml(m.body)}"></audio></div>`;
+  else if (m.type === "video") bubbleInner = `<div class="bubble bubble-video ${side}">${replyQuote}<video controls playsinline preload="metadata" src="${escapeHtml(m.body)}"></video></div>`;
   else if (m.type === "youtube" || detectedYouTube) { const sourceUrl=m.type === "youtube"?m.body:detectedYouTube; const vid=youtubeIdFromClient(sourceUrl); bubbleInner=`<div class="bubble bubble-embed ${side}">${replyQuote}${vid?`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}" title="YouTube video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe><a class="embed-source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceUrl)}</a>`:renderLinkedText(m.body)}</div>`; }
   else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(gifDisplayUrl(detectedGif))}" alt="GIF" loading="lazy" /><a class="embed-source-link" href="${escapeHtml(detectedGif)}" target="_blank" rel="noopener noreferrer">Open GIF</a></div>`;
   else bubbleInner=`<div class="bubble ${side}">${replyQuote}${renderLinkedText(m.body)}</div>`;
@@ -1534,6 +1575,9 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!els.emojiPanel.classList.contains("is-hidden")) closeEmojiPanel();
+  if (!els.plusMenu.classList.contains("is-hidden")) closePlusMenu();
+  if (!els.cameraOverlay.classList.contains("is-hidden")) closeCamera();
+  if (!els.voiceOverlay.classList.contains("is-hidden")) closeVoice();
   if (!els.lightbox.classList.contains("is-hidden")) closeLightbox();
   if (!els.settingsOverlay.classList.contains("is-hidden")) closeSettings();
   if (replyingTo) cancelReply();
@@ -1602,6 +1646,79 @@ async function sendImage(file) {
   }
 }
 
+// ---- Sending a recorded voice or video clip ----------------------------------
+// Mirrors sendImage above, but for a Blob captured via MediaRecorder rather
+// than a picked File. `kind` is "audio" or "video" and drives the upload
+// endpoint, the field name, and the message type.
+const ALLOWED_AUDIO_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav"]);
+const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+const ALLOWED_VIDEO_TYPES = new Set(["video/webm", "video/mp4"]);
+const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
+
+async function sendRecordedMedia(blob, kind) {
+  els.composerError.textContent = "";
+  if (!activeConversation) {
+    els.composerError.textContent = "Open a conversation first.";
+    return false;
+  }
+
+  const allowedTypes = kind === "audio" ? ALLOWED_AUDIO_TYPES : ALLOWED_VIDEO_TYPES;
+  const maxBytes = kind === "audio" ? MAX_AUDIO_BYTES : MAX_VIDEO_BYTES;
+  if (!allowedTypes.has(blob.type)) {
+    els.composerError.textContent = kind === "audio" ? "That recording format isn't supported." : "That recording format isn't supported.";
+    return false;
+  }
+  if (blob.size > maxBytes) {
+    els.composerError.textContent = kind === "audio" ? "Voice messages are limited to 10MB." : "Videos are limited to 25MB.";
+    return false;
+  }
+
+  const previewUrl = URL.createObjectURL(blob);
+  const isGlobal = activeConversation.type === "global";
+  const isGroup = activeConversation.type === "group";
+  const to = isGlobal || isGroup ? null : activeConversation.username;
+
+  if (isGlobal) appendGlobalMessage(me.username, previewUrl, true, kind, { nameColor: me.nameColor, avatarUrl: me.avatarUrl });
+  else if (isGroup) appendGroupMessage(activeConversation.id, me.username, previewUrl, true, kind, { nameColor: me.nameColor, avatarUrl: me.avatarUrl });
+  else {
+    appendMessage(to, previewUrl, true, kind);
+    bumpConversationPreview(to, previewUrl, kind);
+  }
+
+  const formData = new FormData();
+  if (to) formData.append("to", to);
+  formData.append(kind, blob, kind === "audio" ? "voice-message" : "video-message");
+
+  try {
+    const uploadUrl = isGlobal
+      ? `/api/global/messages/${kind}`
+      : isGroup
+      ? `/api/groups/${activeConversation.id}/messages/${kind}`
+      : `/api/messages/${kind}`;
+    const res = await fetch(uploadUrl, {
+      method: "POST",
+      credentials: "same-origin",
+      body: formData,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Upload failed.");
+    if (isGlobal) {
+      replaceGlobalMessageBody(previewUrl, data.message.body, data.message.id);
+    } else if (isGroup) {
+      replaceGroupMessageBody(activeConversation.id, previewUrl, data.message.body, data.message.id);
+    } else {
+      replaceMessageBody(to, previewUrl, data.message.body, data.message.id);
+      bumpConversationPreview(to, data.message.body, kind);
+    }
+    return true;
+  } catch (err) {
+    els.composerError.textContent = err.message;
+    return false;
+  } finally {
+    URL.revokeObjectURL(previewUrl);
+  }
+}
+
 els.imageBtn.addEventListener("click", () => {
   if (!activeConversation) {
     els.composerError.textContent = "Open a conversation first.";
@@ -1659,6 +1776,337 @@ els.threadWrap.addEventListener("drop", (e) => {
   const file = e.dataTransfer.files && e.dataTransfer.files[0];
   if (file) sendImage(file);
 });
+
+// ---- "+" menu: voice message / camera photo / camera video ------------------
+function openPlusMenu() {
+  els.plusMenu.classList.remove("is-hidden");
+  els.plusBtn.classList.add("active");
+}
+
+function closePlusMenu() {
+  els.plusMenu.classList.add("is-hidden");
+  els.plusBtn.classList.remove("active");
+}
+
+els.plusBtn.addEventListener("click", () => {
+  if (!activeConversation) {
+    els.composerError.textContent = "Open a conversation first.";
+    return;
+  }
+  if (els.plusMenu.classList.contains("is-hidden")) openPlusMenu();
+  else closePlusMenu();
+});
+
+document.addEventListener("click", (e) => {
+  if (els.plusMenu.classList.contains("is-hidden")) return;
+  if (els.plusMenu.contains(e.target) || els.plusBtn.contains(e.target)) return;
+  closePlusMenu();
+});
+
+function hasMediaDeviceSupport() {
+  return Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
+function pickSupportedMimeType(candidates) {
+  if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return null;
+  return candidates.find((t) => MediaRecorder.isTypeSupported(t)) || null;
+}
+
+function formatRecTime(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// Small stopwatch used by both the camera and voice modals to show a
+// pulsing "● 0:0X" indicator while recording.
+function makeRecTimer(indicatorEl, timerEl) {
+  let startedAt = 0;
+  let interval = null;
+  return {
+    start() {
+      startedAt = Date.now();
+      timerEl.textContent = "0:00";
+      indicatorEl.classList.remove("is-hidden");
+      interval = setInterval(() => {
+        timerEl.textContent = formatRecTime(Date.now() - startedAt);
+      }, 250);
+    },
+    stop() {
+      if (interval) clearInterval(interval);
+      interval = null;
+      indicatorEl.classList.add("is-hidden");
+    },
+  };
+}
+
+const cameraTimer = makeRecTimer(els.cameraRecIndicator, els.cameraRecTimer);
+const voiceTimer = makeRecTimer(els.voiceRecIndicator, els.voiceRecTimer);
+
+// ---- Camera modal: take a selfie photo, or record a selfie video ------------
+let cameraStream = null;
+let cameraMode = null; // "photo" | "video"
+let cameraRecorder = null;
+let cameraChunks = [];
+let cameraCapturedBlob = null;
+let cameraRecording = false;
+
+function stopCameraStream() {
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((t) => t.stop());
+    cameraStream = null;
+  }
+  els.cameraVideo.srcObject = null;
+}
+
+function resetCameraStage() {
+  els.cameraVideo.classList.remove("is-hidden");
+  els.cameraPhotoPreview.classList.add("is-hidden");
+  els.cameraPhotoPreview.removeAttribute("src");
+  els.cameraVideoPreview.classList.add("is-hidden");
+  els.cameraVideoPreview.pause();
+  els.cameraVideoPreview.removeAttribute("src");
+  els.cameraVideoPreview.load();
+  els.cameraControls.classList.remove("is-hidden");
+  els.cameraReviewControls.classList.add("is-hidden");
+  els.cameraShutter.disabled = false;
+  els.cameraShutter.textContent = cameraMode === "video" ? "Start recording" : "Take photo";
+  cameraTimer.stop();
+  els.cameraError.textContent = "";
+  cameraCapturedBlob = null;
+  cameraRecording = false;
+}
+
+async function startCameraStream() {
+  if (!hasMediaDeviceSupport()) {
+    els.cameraError.textContent = "Your browser doesn't support camera access.";
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: cameraMode === "video" });
+    cameraStream = stream;
+    els.cameraVideo.srcObject = stream;
+  } catch (err) {
+    els.cameraError.textContent = "Couldn't access your camera — check your browser's camera permissions.";
+  }
+}
+
+function openCamera(mode) {
+  closePlusMenu();
+  if (!activeConversation) {
+    els.composerError.textContent = "Open a conversation first.";
+    return;
+  }
+  cameraMode = mode;
+  els.cameraModalTitle.textContent = mode === "photo" ? "Take a photo" : "Record a video";
+  resetCameraStage();
+  els.cameraOverlay.classList.remove("is-hidden");
+  startCameraStream();
+}
+
+function closeCamera() {
+  if (cameraRecorder && cameraRecorder.state !== "inactive") cameraRecorder.stop();
+  stopCameraStream();
+  cameraTimer.stop();
+  els.cameraOverlay.classList.add("is-hidden");
+  resetCameraStage();
+}
+
+function capturePhoto() {
+  const video = els.cameraVideo;
+  if (!video.videoWidth) {
+    els.cameraError.textContent = "Camera isn't ready yet — try again in a moment.";
+    return;
+  }
+  const canvas = els.cameraCanvas;
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(
+    (blob) => {
+      if (!blob) {
+        els.cameraError.textContent = "Couldn't capture the photo.";
+        return;
+      }
+      cameraCapturedBlob = blob;
+      els.cameraPhotoPreview.src = URL.createObjectURL(blob);
+      els.cameraVideo.classList.add("is-hidden");
+      els.cameraPhotoPreview.classList.remove("is-hidden");
+      els.cameraControls.classList.add("is-hidden");
+      els.cameraReviewControls.classList.remove("is-hidden");
+      stopCameraStream();
+    },
+    "image/jpeg",
+    0.92
+  );
+}
+
+function startVideoRecording() {
+  if (!cameraStream) return;
+  cameraChunks = [];
+  const mimeType = pickSupportedMimeType(["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]);
+  try {
+    cameraRecorder = new MediaRecorder(cameraStream, mimeType ? { mimeType } : undefined);
+  } catch (err) {
+    els.cameraError.textContent = "Video recording isn't supported in this browser.";
+    return;
+  }
+  cameraRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size) cameraChunks.push(e.data);
+  };
+  cameraRecorder.onstop = () => {
+    const blob = new Blob(cameraChunks, { type: cameraRecorder.mimeType || "video/webm" });
+    cameraCapturedBlob = blob;
+    els.cameraVideoPreview.src = URL.createObjectURL(blob);
+    els.cameraVideo.classList.add("is-hidden");
+    els.cameraVideoPreview.classList.remove("is-hidden");
+    els.cameraControls.classList.add("is-hidden");
+    els.cameraReviewControls.classList.remove("is-hidden");
+    stopCameraStream();
+  };
+  cameraRecorder.start();
+  cameraRecording = true;
+  els.cameraShutter.textContent = "Stop recording";
+  cameraTimer.start();
+}
+
+function stopVideoRecording() {
+  if (cameraRecorder && cameraRecorder.state !== "inactive") cameraRecorder.stop();
+  cameraRecording = false;
+  cameraTimer.stop();
+}
+
+els.cameraShutter.addEventListener("click", () => {
+  if (cameraMode === "photo") capturePhoto();
+  else if (!cameraRecording) startVideoRecording();
+  else stopVideoRecording();
+});
+
+els.cameraRetake.addEventListener("click", () => {
+  resetCameraStage();
+  startCameraStream();
+});
+
+els.cameraSend.addEventListener("click", () => {
+  if (!cameraCapturedBlob) return;
+  if (cameraMode === "photo") {
+    sendImage(new File([cameraCapturedBlob], "selfie.jpg", { type: cameraCapturedBlob.type }));
+  } else {
+    sendRecordedMedia(cameraCapturedBlob, "video");
+  }
+  closeCamera();
+});
+
+els.cameraClose.addEventListener("click", closeCamera);
+els.cameraOverlay.addEventListener("click", (e) => {
+  if (e.target === els.cameraOverlay) closeCamera();
+});
+
+// ---- Voice modal: record and send a voice message ----------------------------
+let voiceStream = null;
+let voiceRecorder = null;
+let voiceChunks = [];
+let voiceCapturedBlob = null;
+let voiceRecording = false;
+
+function stopVoiceStream() {
+  if (voiceStream) {
+    voiceStream.getTracks().forEach((t) => t.stop());
+    voiceStream = null;
+  }
+}
+
+function resetVoiceStage() {
+  els.voicePreview.classList.add("is-hidden");
+  els.voicePreview.pause();
+  els.voicePreview.removeAttribute("src");
+  els.voicePreview.load();
+  els.voiceMicIcon.classList.remove("is-hidden");
+  els.voiceControls.classList.remove("is-hidden");
+  els.voiceReviewControls.classList.add("is-hidden");
+  els.voiceRecordBtn.textContent = "Start recording";
+  els.voiceRecordBtn.disabled = false;
+  voiceTimer.stop();
+  els.voiceError.textContent = "";
+  voiceCapturedBlob = null;
+  voiceRecording = false;
+}
+
+function openVoice() {
+  closePlusMenu();
+  if (!activeConversation) {
+    els.composerError.textContent = "Open a conversation first.";
+    return;
+  }
+  resetVoiceStage();
+  els.voiceOverlay.classList.remove("is-hidden");
+}
+
+function closeVoice() {
+  if (voiceRecorder && voiceRecorder.state !== "inactive") voiceRecorder.stop();
+  stopVoiceStream();
+  voiceTimer.stop();
+  els.voiceOverlay.classList.add("is-hidden");
+  resetVoiceStage();
+}
+
+async function toggleVoiceRecording() {
+  if (voiceRecording) {
+    if (voiceRecorder && voiceRecorder.state !== "inactive") voiceRecorder.stop();
+    voiceRecording = false;
+    voiceTimer.stop();
+    return;
+  }
+
+  if (!hasMediaDeviceSupport()) {
+    els.voiceError.textContent = "Your browser doesn't support microphone access.";
+    return;
+  }
+  els.voiceError.textContent = "";
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    voiceStream = stream;
+    voiceChunks = [];
+    const mimeType = pickSupportedMimeType(["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]);
+    voiceRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    voiceRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size) voiceChunks.push(e.data);
+    };
+    voiceRecorder.onstop = () => {
+      const blob = new Blob(voiceChunks, { type: voiceRecorder.mimeType || "audio/webm" });
+      voiceCapturedBlob = blob;
+      els.voicePreview.src = URL.createObjectURL(blob);
+      els.voicePreview.classList.remove("is-hidden");
+      els.voiceMicIcon.classList.add("is-hidden");
+      els.voiceControls.classList.add("is-hidden");
+      els.voiceReviewControls.classList.remove("is-hidden");
+      stopVoiceStream();
+    };
+    voiceRecorder.start();
+    voiceRecording = true;
+    els.voiceRecordBtn.textContent = "Stop recording";
+    voiceTimer.start();
+  } catch (err) {
+    els.voiceError.textContent = "Couldn't access your microphone — check your browser's microphone permissions.";
+  }
+}
+
+els.voiceRecordBtn.addEventListener("click", toggleVoiceRecording);
+els.voiceRetake.addEventListener("click", resetVoiceStage);
+els.voiceSend.addEventListener("click", () => {
+  if (!voiceCapturedBlob) return;
+  sendRecordedMedia(voiceCapturedBlob, "audio");
+  closeVoice();
+});
+els.voiceClose.addEventListener("click", closeVoice);
+els.voiceOverlay.addEventListener("click", (e) => {
+  if (e.target === els.voiceOverlay) closeVoice();
+});
+
+els.plusVoice.addEventListener("click", openVoice);
+els.plusPhoto.addEventListener("click", () => openCamera("photo"));
+els.plusVideo.addEventListener("click", () => openCamera("video"));
 
 els.backLink.addEventListener("click", () => {
   els.sidebar.classList.remove("hide-on-mobile");
