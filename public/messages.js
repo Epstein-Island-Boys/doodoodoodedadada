@@ -921,6 +921,36 @@ function formatMessageTimestamp(value) {
   return { short: `${dateStr} ${time}`, full };
 }
 
+// ---- Custom audio player ------------------------------------------------------
+// A plain `<audio controls>` element looks and behaves differently across
+// browsers (and some mobile browsers render it *very* small). This builds a
+// simple, consistent play/pause + scrub-bar + time display — the same basic
+// shape as a Discord voice-message or Google Play track row — wrapping a
+// hidden native <audio> element that does the actual playback work.
+function formatAudioTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function renderAudioPlayer(src) {
+  const safeSrc = escapeHtml(src);
+  return `<div class="audio-player">
+    <button type="button" class="audio-player-btn" data-audio-toggle aria-label="Play">
+      <span class="audio-player-icon audio-player-icon-play">▶</span>
+      <span class="audio-player-icon audio-player-icon-pause is-hidden">❚❚</span>
+    </button>
+    <div class="audio-player-body">
+      <div class="audio-player-bar" data-audio-seek>
+        <div class="audio-player-bar-fill"></div>
+      </div>
+      <div class="audio-player-time"><span class="audio-player-elapsed">0:00</span><span class="audio-player-time-sep">/</span><span class="audio-player-duration">0:00</span></div>
+    </div>
+    <audio preload="metadata" src="${safeSrc}"></audio>
+  </div>`;
+}
+
 function renderBubble(m, kind) {
   // System messages ("X added Y", "X renamed the group") are plain centered
   // text — no bubble, no avatar, no actions.
@@ -961,7 +991,7 @@ function renderBubble(m, kind) {
   const detectedYouTube = m.type === "text" ? extractYouTubeUrl(m.body) : null;
   const detectedGif = m.type === "text" ? extractGifUrl(m.body) : null;
   if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.type === "gif" ? gifDisplayUrl(m.body) : m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" />${m.type === "gif" ? `<a class="embed-source-link" href="${escapeHtml(m.body)}" target="_blank" rel="noopener noreferrer">Open GIF</a>` : ""}</div>`;
-  else if (m.type === "audio") bubbleInner = `<div class="bubble bubble-audio ${side}">${replyQuote}<audio controls preload="metadata" src="${escapeHtml(m.body)}"></audio></div>`;
+  else if (m.type === "audio") bubbleInner = `<div class="bubble bubble-audio ${side}">${replyQuote}${renderAudioPlayer(m.body)}</div>`;
   else if (m.type === "video") bubbleInner = `<div class="bubble bubble-video ${side}">${replyQuote}<video controls playsinline preload="metadata" src="${escapeHtml(m.body)}"></video></div>`;
   else if (m.type === "youtube" || detectedYouTube) { const sourceUrl=m.type === "youtube"?m.body:detectedYouTube; const vid=youtubeIdFromClient(sourceUrl); bubbleInner=`<div class="bubble bubble-embed ${side}">${replyQuote}${vid?`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}" title="YouTube video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe><a class="embed-source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceUrl)}</a>`:renderLinkedText(m.body)}</div>`; }
   else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(gifDisplayUrl(detectedGif))}" alt="GIF" loading="lazy" /><a class="embed-source-link" href="${escapeHtml(detectedGif)}" target="_blank" rel="noopener noreferrer">Open GIF</a></div>`;
@@ -1301,7 +1331,73 @@ els.thread.addEventListener("click", (e) => {
   const img = e.target.closest(".bubble-image img");
   if (img) {
     openLightbox(img.src);
+    return;
   }
+
+  // ---- Custom audio player: play/pause + click-to-seek ----------------------
+  const toggleBtn = e.target.closest("[data-audio-toggle]");
+  if (toggleBtn) {
+    const audio = toggleBtn.closest(".audio-player").querySelector("audio");
+    // Pause any other clip already playing so two voice messages don't
+    // overlap.
+    if (audio.paused) {
+      els.thread.querySelectorAll(".audio-player audio").forEach((other) => {
+        if (other !== audio && !other.paused) other.pause();
+      });
+      audio.play().catch(() => {});
+    } else {
+      audio.pause();
+    }
+    return;
+  }
+
+  const seekBar = e.target.closest("[data-audio-seek]");
+  if (seekBar) {
+    const audio = seekBar.closest(".audio-player").querySelector("audio");
+    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+      const rect = seekBar.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      audio.currentTime = ratio * audio.duration;
+    }
+    return;
+  }
+});
+
+// Media events (timeupdate, loadedmetadata, play, pause, ended) don't bubble
+// like normal DOM events, but a capture-phase listener on an ancestor still
+// sees them on the way down to the actual <audio> element, so this still
+// works as delegation without binding a fresh listener per bubble.
+function syncAudioPlayerUI(audio) {
+  const player = audio.closest(".audio-player");
+  if (!player) return;
+  const fill = player.querySelector(".audio-player-bar-fill");
+  const elapsed = player.querySelector(".audio-player-elapsed");
+  const duration = player.querySelector(".audio-player-duration");
+  const playIcon = player.querySelector(".audio-player-icon-play");
+  const pauseIcon = player.querySelector(".audio-player-icon-pause");
+  const btn = player.querySelector("[data-audio-toggle]");
+
+  const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+  const cur = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+  if (fill) fill.style.width = dur > 0 ? `${Math.min(100, (cur / dur) * 100)}%` : "0%";
+  if (elapsed) elapsed.textContent = formatAudioTime(cur);
+  if (duration) duration.textContent = formatAudioTime(dur);
+  const playing = !audio.paused && !audio.ended;
+  if (playIcon) playIcon.classList.toggle("is-hidden", playing);
+  if (pauseIcon) pauseIcon.classList.toggle("is-hidden", !playing);
+  if (btn) btn.setAttribute("aria-label", playing ? "Pause" : "Play");
+}
+
+["loadedmetadata", "timeupdate", "play", "pause", "ended"].forEach((evt) => {
+  els.thread.addEventListener(
+    evt,
+    (e) => {
+      if (e.target instanceof HTMLAudioElement && e.target.closest(".audio-player")) {
+        syncAudioPlayerUI(e.target);
+      }
+    },
+    true
+  );
 });
 
 els.thread.addEventListener("submit", (e) => {
@@ -1687,9 +1783,7 @@ function baseMimeType(mimeType) {
   return String(mimeType || "").split(";")[0].trim().toLowerCase();
 }
 
-const ALLOWED_AUDIO_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav"]);
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
-const ALLOWED_VIDEO_TYPES = new Set(["video/webm", "video/mp4"]);
 const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
 
 // A blob's `type` alone isn't enough — when the file gets downloaded again
@@ -1702,13 +1796,16 @@ const EXTENSION_BY_MIME = {
   "audio/mp4": "m4a",
   "audio/mpeg": "mp3",
   "audio/wav": "wav",
+  "audio/x-wav": "wav",
   "video/webm": "webm",
   "video/mp4": "mp4",
+  "video/x-matroska": "mkv",
+  "video/quicktime": "mov",
 };
 
 function filenameForBlob(blob, kind) {
   const base = baseMimeType(blob.type);
-  const ext = EXTENSION_BY_MIME[base] || "webm";
+  const ext = EXTENSION_BY_MIME[base] || base.split("/")[1] || "webm";
   const stem = kind === "audio" ? "voice-message" : "video-message";
   return `${stem}.${ext}`;
 }
@@ -1720,10 +1817,13 @@ async function sendRecordedMedia(blob, kind) {
     return false;
   }
 
-  const allowedTypes = kind === "audio" ? ALLOWED_AUDIO_TYPES : ALLOWED_VIDEO_TYPES;
+  // Match the server's fileFilter: accept any real audio/* or video/* type
+  // rather than a hardcoded codec allowlist, since MediaRecorder's exact
+  // output string varies by browser.
   const maxBytes = kind === "audio" ? MAX_AUDIO_BYTES : MAX_VIDEO_BYTES;
-  if (!allowedTypes.has(baseMimeType(blob.type))) {
-    els.composerError.textContent = kind === "audio" ? "That recording format isn't supported." : "That recording format isn't supported.";
+  if (!baseMimeType(blob.type).startsWith(`${kind}/`)) {
+    console.error(`Recorded ${kind} blob has unexpected type:`, blob.type);
+    els.composerError.textContent = "That recording format isn't supported.";
     return false;
   }
   if (blob.size > maxBytes) {

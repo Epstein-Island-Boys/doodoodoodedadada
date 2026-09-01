@@ -912,8 +912,78 @@ h1 {
 }
 
 .bubble-audio audio {
-  display: block;
+  display: none;
+}
+
+.audio-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: min(280px, 100%);
+  padding: 6px 4px;
+}
+
+.audio-player-btn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: none;
+  background: var(--sage);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.audio-player-btn:hover {
+  filter: brightness(1.08);
+}
+
+.audio-player-icon-play {
+  padding-left: 2px; /* optically center the ▶ glyph */
+}
+
+.audio-player-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.audio-player-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  cursor: pointer;
+}
+
+.audio-player-bar-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 0%;
+  border-radius: 3px;
+  background: var(--sage);
+  pointer-events: none;
+}
+
+.audio-player-time {
+  font-size: 0.72rem;
+  color: var(--bark);
+  display: flex;
+  gap: 4px;
+}
+
+.audio-player-time-sep {
+  opacity: 0.6;
 }
 
 .bubble-video video {

@@ -298,25 +298,31 @@ function baseMimeType(mimeType) {
 // Voice messages, recorded in-browser with MediaRecorder. Kept well under
 // the video limit below since these are meant to be quick clips, not long
 // recordings.
-const ALLOWED_AUDIO_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav"]);
+//
+// Rather than hardcode an exact allowlist of container/codec strings — which
+// varies by browser and kept rejecting perfectly valid recordings (Firefox,
+// Safari and Chrome each report slightly different mimetypes) — accept
+// anything the browser genuinely declares as audio/*. It's an authenticated,
+// same-origin upload; there's no meaningful security gain from guessing
+// codec strings, only false rejections.
 const uploadAudio = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
-    if (!ALLOWED_AUDIO_TYPES.has(baseMimeType(file.mimetype))) {
+    if (!baseMimeType(file.mimetype).startsWith("audio/")) {
       return cb(new Error("That audio format isn't supported."));
     }
     cb(null, true);
   },
 });
 
-// Selfie-cam video clips, also recorded in-browser with MediaRecorder.
-const ALLOWED_VIDEO_TYPES = new Set(["video/webm", "video/mp4"]);
+// Selfie-cam video clips, also recorded in-browser with MediaRecorder. Same
+// reasoning as uploadAudio above — accept any real video/* type.
 const uploadVideo = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
   fileFilter: (req, file, cb) => {
-    if (!ALLOWED_VIDEO_TYPES.has(baseMimeType(file.mimetype))) {
+    if (!baseMimeType(file.mimetype).startsWith("video/")) {
       return cb(new Error("That video format isn't supported."));
     }
     cb(null, true);
@@ -2213,12 +2219,16 @@ const EXTENSION_BY_MIME = {
   "audio/mp4": "m4a",
   "audio/mpeg": "mp3",
   "audio/wav": "wav",
+  "audio/x-wav": "wav",
   "video/webm": "webm",
   "video/mp4": "mp4",
+  "video/x-matroska": "mkv",
+  "video/quicktime": "mov",
 };
 
 function filenameForMime(mimeType, id) {
-  const ext = EXTENSION_BY_MIME[baseMimeType(mimeType)] || "bin";
+  const base = baseMimeType(mimeType);
+  const ext = EXTENSION_BY_MIME[base] || base.split("/")[1] || "bin";
   return `media-${id}.${ext}`;
 }
 
