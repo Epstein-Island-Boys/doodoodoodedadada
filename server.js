@@ -1494,7 +1494,7 @@ app.post("/api/groups/:id/messages/image", requireAuth, (req, res) => {
 // One shared room everyone can post to and read. No block/mute filtering here
 // on purpose — those only govern DMs and DM notifications; the global room is
 // a public space everyone in it can see in full.
-const GLOBAL_HISTORY_LIMIT = 200;
+const GLOBAL_HISTORY_LIMIT = 500;
 
 // How many global messages we keep in the database at once. Every time
 // someone posts, we trim the room back down to this count by deleting the
