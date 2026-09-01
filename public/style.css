@@ -918,15 +918,15 @@ h1 {
 .audio-player {
   display: flex;
   align-items: center;
-  gap: 10px;
-  width: min(280px, 100%);
-  padding: 6px 4px;
+  gap: 12px;
+  width: min(260px, 100%);
+  padding: 4px 6px 4px 4px;
 }
 
 .audio-player-btn {
   flex: none;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   border-radius: 50%;
   border: none;
   background: var(--sage);
@@ -935,17 +935,21 @@ h1 {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 0.8rem;
-  line-height: 1;
   padding: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  transition: transform 0.1s ease, filter 0.1s ease;
 }
 
 .audio-player-btn:hover {
   filter: brightness(1.08);
 }
 
+.audio-player-btn:active {
+  transform: scale(0.94);
+}
+
 .audio-player-icon-play {
-  padding-left: 2px; /* optically center the ▶ glyph */
+  margin-left: 2px; /* optically center the triangle */
 }
 
 .audio-player-body {
@@ -953,33 +957,58 @@ h1 {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
-.audio-player-bar {
+.audio-waveform {
   position: relative;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--line);
+  height: 26px;
   cursor: pointer;
 }
 
-.audio-player-bar-fill {
+.audio-waveform-track {
   position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  width: 0%;
-  border-radius: 3px;
-  background: var(--sage);
+  inset: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.audio-waveform-track span {
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 100%;
+  border-radius: 2px;
+  background: currentColor;
+  align-self: center;
+}
+
+.audio-waveform-track.is-muted span {
+  opacity: 0.25;
+}
+
+.audio-waveform-track.is-fill {
+  color: var(--sage);
   pointer-events: none;
+  transition: clip-path 0.1s linear;
+}
+
+.bubble.mine .audio-waveform-track.is-fill {
+  color: var(--paper);
 }
 
 .audio-player-time {
-  font-size: 0.72rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
   color: var(--bark);
+  opacity: 0.85;
   display: flex;
   gap: 4px;
+}
+
+.bubble.mine .audio-player-time {
+  color: inherit;
+  opacity: 0.75;
 }
 
 .audio-player-time-sep {

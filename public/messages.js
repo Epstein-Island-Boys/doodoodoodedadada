@@ -924,9 +924,9 @@ function formatMessageTimestamp(value) {
 // ---- Custom audio player ------------------------------------------------------
 // A plain `<audio controls>` element looks and behaves differently across
 // browsers (and some mobile browsers render it *very* small). This builds a
-// simple, consistent play/pause + scrub-bar + time display — the same basic
-// shape as a Discord voice-message or Google Play track row — wrapping a
-// hidden native <audio> element that does the actual playback work.
+// Voice-Memos/WhatsApp-style player instead: a round play button next to a
+// waveform, with the played portion picked out in a solid color — wrapping
+// a hidden native <audio> element that does the actual playback work.
 function formatAudioTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const m = Math.floor(seconds / 60);
@@ -934,16 +934,56 @@ function formatAudioTime(seconds) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+// The waveform bars are decorative, not a real amplitude analysis of the
+// clip (that would mean fetching and decoding the whole file just to draw
+// a picture) — but they're seeded from the clip's own URL so the same
+// message always renders the same "shape" instead of reshuffling every
+// time the thread re-renders, and a touch of smoothing keeps it from
+// looking like pure static.
+const WAVEFORM_BAR_COUNT = 26;
+function hashStringToSeed(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function waveformHeights(seedSrc) {
+  const rand = mulberry32(hashStringToSeed(seedSrc));
+  const raw = Array.from({ length: WAVEFORM_BAR_COUNT }, () => rand());
+  return raw.map((v, i) => {
+    const prev = raw[i - 1] ?? v;
+    const next = raw[i + 1] ?? v;
+    const smoothed = (prev + v * 2 + next) / 4; // light smoothing = organic shape, not noise
+    return Math.round(22 + smoothed * 78); // 22%-100% of the waveform's height
+  });
+}
+
 function renderAudioPlayer(src) {
   const safeSrc = escapeHtml(src);
+  const bars = waveformHeights(src)
+    .map((h) => `<span style="height:${h}%"></span>`)
+    .join("");
   return `<div class="audio-player">
     <button type="button" class="audio-player-btn" data-audio-toggle aria-label="Play">
-      <span class="audio-player-icon audio-player-icon-play">▶</span>
-      <span class="audio-player-icon audio-player-icon-pause is-hidden">❚❚</span>
+      <svg class="audio-player-icon audio-player-icon-play" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.5 1.6v12.8a.9.9 0 0 0 1.37.77l10.2-6.4a.9.9 0 0 0 0-1.54l-10.2-6.4a.9.9 0 0 0-1.37.77z" fill="currentColor"/></svg>
+      <svg class="audio-player-icon audio-player-icon-pause is-hidden" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><rect x="3" y="1.8" width="3.6" height="12.4" rx="1.2" fill="currentColor"/><rect x="9.4" y="1.8" width="3.6" height="12.4" rx="1.2" fill="currentColor"/></svg>
     </button>
     <div class="audio-player-body">
-      <div class="audio-player-bar" data-audio-seek>
-        <div class="audio-player-bar-fill"></div>
+      <div class="audio-waveform" data-audio-seek>
+        <div class="audio-waveform-track is-muted">${bars}</div>
+        <div class="audio-waveform-track is-fill" style="clip-path: inset(0 100% 0 0)">${bars}</div>
       </div>
       <div class="audio-player-time"><span class="audio-player-elapsed">0:00</span><span class="audio-player-time-sep">/</span><span class="audio-player-duration">0:00</span></div>
     </div>
@@ -1370,7 +1410,7 @@ els.thread.addEventListener("click", (e) => {
 function syncAudioPlayerUI(audio) {
   const player = audio.closest(".audio-player");
   if (!player) return;
-  const fill = player.querySelector(".audio-player-bar-fill");
+  const fillTrack = player.querySelector(".audio-waveform-track.is-fill");
   const elapsed = player.querySelector(".audio-player-elapsed");
   const duration = player.querySelector(".audio-player-duration");
   const playIcon = player.querySelector(".audio-player-icon-play");
@@ -1381,12 +1421,13 @@ function syncAudioPlayerUI(audio) {
   // the duration of a MediaRecorder-produced webm/opus clip, since the
   // container's duration header is never written for a live-recorded
   // stream. Treat that the same as "not known yet" rather than as 0, or
-  // the bar and time never recover once the real duration is resolved
-  // (see fixInfiniteDuration below, which is what actually resolves it).
+  // the waveform and time never recover once the real duration is
+  // resolved (see fixInfiniteDuration below, which resolves it).
   const durKnown = Number.isFinite(audio.duration) && audio.duration > 0;
   const dur = durKnown ? audio.duration : 0;
   const cur = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-  if (fill) fill.style.width = durKnown ? `${Math.min(100, (cur / dur) * 100)}%` : "0%";
+  const playedPct = durKnown ? Math.min(100, (cur / dur) * 100) : 0;
+  if (fillTrack) fillTrack.style.clipPath = `inset(0 ${100 - playedPct}% 0 0)`;
   if (elapsed) elapsed.textContent = formatAudioTime(cur);
   if (duration) duration.textContent = durKnown ? formatAudioTime(dur) : "…";
   const playing = !audio.paused && !audio.ended;

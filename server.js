@@ -330,18 +330,22 @@ const uploadAudio = multer({
   },
 });
 
-// Selfie-cam video clips, also recorded in-browser with MediaRecorder. Same
-// reasoning as uploadAudio above — accept any real video/* type, plus the
-// generic/blank case.
+// Selfie-cam video clips, recorded in-browser with MediaRecorder. Different
+// browsers (and in some cases the same browser across a redeploy) report
+// wildly different strings here — "video/webm;codecs=vp9,opus",
+// "video/mp4", "video/x-matroska", occasionally something generic like
+// "application/octet-stream" when a webview doesn't carry the Blob's real
+// type through to the multipart request at all. Trying to allowlist that
+// kept producing false "isn't supported" rejections for perfectly good
+// recordings, so this endpoint no longer gates on mimetype at all — it's an
+// authenticated, same-origin upload used by nothing but our own recorder,
+// so there's no real security benefit to guessing codec strings, only
+// broken uploads. Whatever the browser sends is accepted; resolveStoredMimeType
+// below still makes sure something *playable* ends up in the DB even when
+// what came in was generic.
 const uploadVideo = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
-  fileFilter: (req, file, cb) => {
-    if (!baseMimeType(file.mimetype).startsWith("video/") && !isGenericMimeType(file.mimetype)) {
-      return cb(new Error("That video format isn't supported."));
-    }
-    cb(null, true);
-  },
 });
 
 // When a file's mimetype came through as one of the generic values above,
