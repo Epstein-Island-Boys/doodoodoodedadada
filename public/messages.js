@@ -1650,6 +1650,13 @@ async function sendImage(file) {
 // Mirrors sendImage above, but for a Blob captured via MediaRecorder rather
 // than a picked File. `kind` is "audio" or "video" and drives the upload
 // endpoint, the field name, and the message type.
+// Mirrors the server's baseMimeType() — MediaRecorder's Blob.type usually
+// carries a codec suffix (e.g. "audio/webm;codecs=opus"), so compare on the
+// base type only rather than the exact string.
+function baseMimeType(mimeType) {
+  return String(mimeType || "").split(";")[0].trim().toLowerCase();
+}
+
 const ALLOWED_AUDIO_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav"]);
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const ALLOWED_VIDEO_TYPES = new Set(["video/webm", "video/mp4"]);
@@ -1664,7 +1671,7 @@ async function sendRecordedMedia(blob, kind) {
 
   const allowedTypes = kind === "audio" ? ALLOWED_AUDIO_TYPES : ALLOWED_VIDEO_TYPES;
   const maxBytes = kind === "audio" ? MAX_AUDIO_BYTES : MAX_VIDEO_BYTES;
-  if (!allowedTypes.has(blob.type)) {
+  if (!allowedTypes.has(baseMimeType(blob.type))) {
     els.composerError.textContent = kind === "audio" ? "That recording format isn't supported." : "That recording format isn't supported.";
     return false;
   }

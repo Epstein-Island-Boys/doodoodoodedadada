@@ -286,6 +286,15 @@ const upload = multer({
   },
 });
 
+// MediaRecorder's Blob.type (and therefore the multipart Content-Type the
+// browser sends) usually carries a codec suffix, e.g. "audio/webm;codecs=opus"
+// or "video/webm;codecs=vp9,opus" — not the bare "audio/webm" a naive Set
+// lookup would expect. Compare on the base type only so real recordings
+// aren't rejected as an "unsupported format".
+function baseMimeType(mimeType) {
+  return String(mimeType || "").split(";")[0].trim().toLowerCase();
+}
+
 // Voice messages, recorded in-browser with MediaRecorder. Kept well under
 // the video limit below since these are meant to be quick clips, not long
 // recordings.
@@ -294,7 +303,7 @@ const uploadAudio = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
-    if (!ALLOWED_AUDIO_TYPES.has(file.mimetype)) {
+    if (!ALLOWED_AUDIO_TYPES.has(baseMimeType(file.mimetype))) {
       return cb(new Error("That audio format isn't supported."));
     }
     cb(null, true);
@@ -307,7 +316,7 @@ const uploadVideo = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
   fileFilter: (req, file, cb) => {
-    if (!ALLOWED_VIDEO_TYPES.has(file.mimetype)) {
+    if (!ALLOWED_VIDEO_TYPES.has(baseMimeType(file.mimetype))) {
       return cb(new Error("That video format isn't supported."));
     }
     cb(null, true);
