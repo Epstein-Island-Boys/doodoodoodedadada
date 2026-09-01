@@ -26,6 +26,161 @@ const onlineUsers = new Map(); // lowercased username -> display-cased username,
 // Global Chat headcount/popover.
 const typingUsers = new Map(); // scope key -> Map(username -> timeoutId)
 
+// ---- Windowed history loading ---------------------------------------------------
+// Every thread (a DM, the global room, or a group) keeps at most HISTORY_PAGE_SIZE
+// messages loaded in memory/DOM at once. Scrolling to the top loads the next
+// HISTORY_LOAD_MORE_SIZE older messages and unloads that many from the newest
+// end; scrolling back to the bottom does the reverse. This keeps both memory
+// use and the initial page load small no matter how long a thread's history is.
+const HISTORY_PAGE_SIZE = 300;
+const HISTORY_LOAD_MORE_SIZE = 200;
+const HISTORY_TRIM_BUFFER = 100; // how far past HISTORY_PAGE_SIZE we let a live thread grow before trimming
+const SCROLL_LOAD_THRESHOLD = 80; // px from an edge that triggers loading the next page
+const threadMeta = new Map(); // username -> pagination state
+const groupMeta = new Map(); // groupId -> pagination state
+let globalMetaState = null; // pagination state for the global room
+
+function freshMeta() {
+  return { everFetched: false, hasMoreOlder: false, hasMoreNewer: false, loadingOlder: false, loadingNewer: false };
+}
+function metaFor(kind, key) {
+  if (kind === "global") {
+    if (!globalMetaState) globalMetaState = freshMeta();
+    return globalMetaState;
+  }
+  if (kind === "group") {
+    if (!groupMeta.has(key)) groupMeta.set(key, freshMeta());
+    return groupMeta.get(key);
+  }
+  if (!threadMeta.has(key)) threadMeta.set(key, freshMeta());
+  return threadMeta.get(key);
+}
+// Returns the live array backing a thread's messages, creating it if needed.
+// Kept as a plain array (not a wrapper object) so all the existing
+// find/push/splice/filter code elsewhere in this file keeps working untouched.
+function arrayRefFor(kind, key) {
+  if (kind === "global") {
+    if (!globalMessages) globalMessages = [];
+    return globalMessages;
+  }
+  if (kind === "group") {
+    if (!groupMessageCache.has(key)) groupMessageCache.set(key, []);
+    return groupMessageCache.get(key);
+  }
+  if (!threadCache.has(key)) threadCache.set(key, []);
+  return threadCache.get(key);
+}
+function apiPathFor(kind, key) {
+  if (kind === "global") return "/api/global/messages";
+  if (kind === "group") return `/api/groups/${key}/messages`;
+  return `/api/messages/${encodeURIComponent(key)}`;
+}
+function isActiveThread(kind, key) {
+  if (!activeConversation) return false;
+  if (kind === "global") return activeConversation.type === "global";
+  if (kind === "group") return activeConversation.type === "group" && activeConversation.id === key;
+  return activeConversation.type === "dm" && sameUsername(activeConversation.username, key);
+}
+// If we're mid-history (scrolled up, newest messages unloaded) and the local
+// user sends a new message, jump the view back to "live" rather than
+// splicing the new message in after a gap of hidden history.
+function resetToLiveIfNeeded(kind, key) {
+  const meta = metaFor(kind, key);
+  if (!meta.hasMoreNewer) return;
+  arrayRefFor(kind, key).length = 0;
+  meta.hasMoreNewer = false;
+  meta.hasMoreOlder = true;
+}
+// Keeps a live (caught-up) thread from growing forever while it's the
+// active conversation and messages keep arriving.
+function trimIfNeeded(kind, key) {
+  const meta = metaFor(kind, key);
+  if (meta.hasMoreNewer) return; // only trim from the live tail
+  const items = arrayRefFor(kind, key);
+  if (items.length > HISTORY_PAGE_SIZE + HISTORY_TRIM_BUFFER) {
+    items.splice(0, items.length - HISTORY_PAGE_SIZE);
+    meta.hasMoreOlder = true;
+  }
+}
+
+async function loadOlderMessages(kind, key) {
+  const meta = metaFor(kind, key);
+  if (meta.loadingOlder || !meta.hasMoreOlder) return;
+  const items = arrayRefFor(kind, key);
+  const oldest = items[0];
+  if (!oldest || oldest.id == null) return;
+  meta.loadingOlder = true;
+  try {
+    const qs = new URLSearchParams({ limit: String(HISTORY_LOAD_MORE_SIZE), before: String(oldest.id) });
+    const data = await apiGet(`${apiPathFor(kind, key)}?${qs}`);
+    const older = data.messages || [];
+    meta.hasMoreOlder = Boolean(data.hasMore);
+    if (older.length) {
+      if (items.length > HISTORY_LOAD_MORE_SIZE) items.splice(items.length - HISTORY_LOAD_MORE_SIZE, HISTORY_LOAD_MORE_SIZE);
+      else items.length = 0;
+      meta.hasMoreNewer = true;
+      items.unshift(...older);
+      if (isActiveThread(kind, key)) {
+        const prevHeight = els.thread.scrollHeight;
+        const prevTop = els.thread.scrollTop;
+        renderThread({ preserveScrollFrom: { prevHeight, prevTop } });
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load older messages:", e);
+  } finally {
+    meta.loadingOlder = false;
+  }
+}
+
+async function loadNewerMessages(kind, key) {
+  const meta = metaFor(kind, key);
+  if (meta.loadingNewer || !meta.hasMoreNewer) return;
+  const items = arrayRefFor(kind, key);
+  const newest = items[items.length - 1];
+  if (!newest || newest.id == null) return;
+  meta.loadingNewer = true;
+  try {
+    const qs = new URLSearchParams({ limit: String(HISTORY_LOAD_MORE_SIZE), after: String(newest.id) });
+    const data = await apiGet(`${apiPathFor(kind, key)}?${qs}`);
+    const newer = data.messages || [];
+    meta.hasMoreNewer = Boolean(data.hasMore);
+    if (newer.length) {
+      if (items.length > HISTORY_LOAD_MORE_SIZE) items.splice(0, HISTORY_LOAD_MORE_SIZE);
+      else items.length = 0;
+      meta.hasMoreOlder = true;
+      items.push(...newer);
+      if (isActiveThread(kind, key)) renderThread();
+    }
+  } catch (e) {
+    console.error("Failed to load newer messages:", e);
+  } finally {
+    meta.loadingNewer = false;
+  }
+}
+
+let scrollLoadTicking = false;
+function handleThreadScroll() {
+  if (scrollLoadTicking || !activeConversation) return;
+  scrollLoadTicking = true;
+  requestAnimationFrame(() => {
+    scrollLoadTicking = false;
+    if (!activeConversation) return;
+    const kind = activeConversation.type;
+    const key = kind === "group" ? activeConversation.id : kind === "dm" ? activeConversation.username : null;
+    const meta = metaFor(kind, key);
+    if (els.thread.scrollTop <= SCROLL_LOAD_THRESHOLD && meta.hasMoreOlder && !meta.loadingOlder) {
+      loadOlderMessages(kind, key);
+    } else if (
+      els.thread.scrollHeight - els.thread.scrollTop - els.thread.clientHeight <= SCROLL_LOAD_THRESHOLD &&
+      meta.hasMoreNewer &&
+      !meta.loadingNewer
+    ) {
+      loadNewerMessages(kind, key);
+    }
+  });
+}
+
 const els = {
   whoAmI: document.getElementById("who-am-i"),
   convList: document.getElementById("conversation-list"),
@@ -112,6 +267,8 @@ const els = {
   relationsList: document.getElementById("relations-list"),
   logoutBtn: document.getElementById("logout-btn"),
 };
+
+els.thread.addEventListener("scroll", handleThreadScroll);
 
 const DEFAULT_NAME_COLOR = "#2F3B26";
 const DEFAULT_LIGHT_BG = "#F3EFE1";
@@ -515,6 +672,7 @@ els.groupMenuLeave?.addEventListener("click", async () => {
     await apiPost(`/api/groups/${groupId}/leave`, {});
     groups = groups.filter((g) => g.id !== groupId);
     groupMessageCache.delete(groupId);
+    groupMeta.delete(groupId);
     renderConversationList();
     if (isActiveGroup(groupId)) {
       activeConversation = null;
@@ -571,9 +729,13 @@ async function openThread(username) {
   renderOnlineBadges();
   els.onlinePopover.classList.add("is-hidden");
 
-  if (!threadCache.has(username)) {
-    const data = await apiGet(`/api/messages/${encodeURIComponent(username)}`);
+  const dmMeta = metaFor("dm", username);
+  if (!dmMeta.everFetched) {
+    const data = await apiGet(`/api/messages/${encodeURIComponent(username)}?limit=${HISTORY_PAGE_SIZE}`);
     threadCache.set(username, data.messages || []);
+    dmMeta.everFetched = true;
+    dmMeta.hasMoreOlder = Boolean(data.hasMore);
+    dmMeta.hasMoreNewer = false;
   }
   ensurePartnerProfile(username);
   renderThread();
@@ -606,9 +768,13 @@ async function openGlobal() {
   renderTypingIndicator();
   renderOnlineBadges();
 
-  if (globalMessages === null) {
-    const data = await apiGet("/api/global/messages");
+  const gMeta = metaFor("global", null);
+  if (!gMeta.everFetched) {
+    const data = await apiGet(`/api/global/messages?limit=${HISTORY_PAGE_SIZE}`);
     globalMessages = data.messages || [];
+    gMeta.everFetched = true;
+    gMeta.hasMoreOlder = Boolean(data.hasMore);
+    gMeta.hasMoreNewer = false;
   }
   renderThread();
   els.composerInput.focus();
@@ -633,9 +799,13 @@ async function openGroupThread(groupId) {
   renderOnlineBadges();
   els.onlinePopover.classList.add("is-hidden");
 
-  if (!groupMessageCache.has(groupId)) {
-    const data = await apiGet(`/api/groups/${groupId}/messages`);
+  const grMeta = metaFor("group", groupId);
+  if (!grMeta.everFetched) {
+    const data = await apiGet(`/api/groups/${groupId}/messages?limit=${HISTORY_PAGE_SIZE}`);
     groupMessageCache.set(groupId, data.messages || []);
+    grMeta.everFetched = true;
+    grMeta.hasMoreOlder = Boolean(data.hasMore);
+    grMeta.hasMoreNewer = false;
   }
   renderThread();
   els.composerInput.focus();
@@ -676,6 +846,42 @@ function renderReplyQuote(reply) {
   return `<button type="button" class="reply-quote" data-jump-to="${reply.id}"><span class="reply-quote-name">${escapeHtml(label)}</span>${escapeHtml(replySnippetText(reply))}</button>`;
 }
 
+// ---- Message timestamps -----------------------------------------------------
+// Every message carries a `created_at` — either straight from the server
+// (SQLite's `datetime('now')`, which is UTC but written as "YYYY-MM-DD
+// HH:MM:SS" with no timezone marker) or, for a message we just sent
+// ourselves, `new Date().toISOString()` (already has one). `new Date()`
+// can't be trusted to guess right on a string with no marker — some
+// browsers read it as UTC, some as local — so we normalize it ourselves
+// before parsing. Once parsed, everything below renders in whatever
+// timezone the device is set to, since that's all `toLocaleString` etc.
+// know how to use.
+function parseServerDate(value) {
+  if (!value) return null;
+  let normalized = value;
+  if (typeof normalized === "string" && !/[zZ]|[+-]\d\d:?\d\d$/.test(normalized)) {
+    normalized = normalized.replace(" ", "T") + "Z";
+  }
+  const d = new Date(normalized);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatMessageTimestamp(value) {
+  const d = parseServerDate(value);
+  if (!d) return { short: "", full: "" };
+  const now = new Date();
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const full = d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+  const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+
+  if (dayDiff === 0) return { short: time, full };
+  if (dayDiff === 1) return { short: `Yesterday ${time}`, full };
+  const dateStr = d.toLocaleDateString(undefined, d.getFullYear() === now.getFullYear() ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+  return { short: `${dateStr} ${time}`, full };
+}
+
 function renderBubble(m, kind) {
   // System messages ("X added Y", "X renamed the group") are plain centered
   // text — no bubble, no avatar, no actions.
@@ -700,6 +906,8 @@ function renderBubble(m, kind) {
     isMulti && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
   const seen = kind === "dm" && m.mine ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>` : "";
   const editedTag = m.edited ? `<span class="edited-tag">(edited)</span>` : "";
+  const { short: timeShort, full: timeFull } = formatMessageTimestamp(m.created_at);
+  const timestamp = timeShort ? `<span class="msg-timestamp" title="${escapeHtml(timeFull)}">${escapeHtml(timeShort)}</span>` : "";
   const replyQuote = renderReplyQuote(m.reply);
 
   const canManage = m.mine;
@@ -721,11 +929,11 @@ function renderBubble(m, kind) {
   return `<div class="bubble-group ${side}" data-id="${m.id ?? ""}">
     ${senderLabel}
     <div class="bubble-row">${bubbleInner}${actions}</div>
-    <div class="bubble-meta-row">${editedTag}${seen}</div>
+    <div class="bubble-meta-row">${timestamp}${editedTag}${seen}</div>
   </div>`;
 }
 
-function renderThread() {
+function renderThread(opts = {}) {
   const kind = activeConversation ? activeConversation.type : null; // "dm" | "global" | "group" | null
   const messages =
     kind === "global"
@@ -736,11 +944,20 @@ function renderThread() {
       ? threadCache.get(activeConversation.username) || []
       : [];
   els.thread.innerHTML = messages.map((m) => renderBubble(m, kind)).join("");
-  els.thread.scrollTop = els.thread.scrollHeight;
+  if (opts.preserveScrollFrom) {
+    // Used after loading an older page: keep whatever the user was looking
+    // at in the same spot instead of jumping to the top or bottom.
+    const { prevHeight, prevTop } = opts.preserveScrollFrom;
+    els.thread.scrollTop = els.thread.scrollHeight - prevHeight + prevTop;
+  } else {
+    els.thread.scrollTop = els.thread.scrollHeight;
+  }
 }
 
 function appendMessage(username, body, mine, type = "text", extra = {}) {
-  const list = threadCache.get(username) || [];
+  if (mine) resetToLiveIfNeeded("dm", username);
+  else if (metaFor("dm", username).hasMoreNewer) return; // scrolled up in history — will show up once they scroll back down
+  const list = arrayRefFor("dm", username);
   list.push({
     id: extra.id ?? null,
     body,
@@ -751,13 +968,17 @@ function appendMessage(username, body, mine, type = "text", extra = {}) {
     edited: false,
     reply: extra.reply || null,
   });
-  threadCache.set(username, list);
+  trimIfNeeded("dm", username);
   if (isActiveDm(username)) renderThread();
 }
 
 function appendGlobalMessage(sender, body, mine, type = "text", extra = {}) {
-  if (globalMessages === null) globalMessages = [];
-  globalMessages.push({
+  globalPreview = previewFor(body, type);
+  els.globalPreview.textContent = mine ? `You: ${globalPreview}` : `${sender}: ${globalPreview}`;
+  if (mine) resetToLiveIfNeeded("global", null);
+  else if (metaFor("global", null).hasMoreNewer) return; // scrolled up in history — will show up once they scroll back down
+  const list = arrayRefFor("global", null);
+  list.push({
     id: extra.id ?? null,
     sender,
     nameColor: extra.nameColor || null,
@@ -769,8 +990,7 @@ function appendGlobalMessage(sender, body, mine, type = "text", extra = {}) {
     edited: false,
     reply: extra.reply || null,
   });
-  globalPreview = previewFor(body, type);
-  els.globalPreview.textContent = mine ? `You: ${globalPreview}` : `${sender}: ${globalPreview}`;
+  trimIfNeeded("global", null);
   if (activeConversation && activeConversation.type === "global") renderThread();
 }
 
@@ -783,7 +1003,11 @@ function bumpGroupPreview(groupId, body, type, extra = {}) {
 }
 
 function appendGroupMessage(groupId, sender, body, mine, type = "text", extra = {}) {
-  const list = groupMessageCache.get(groupId) || [];
+  const activeNow = isActiveGroup(groupId) && document.hasFocus();
+  bumpGroupPreview(groupId, body, type, { incrementUnread: type !== "system" && !mine && !activeNow });
+  if (mine) resetToLiveIfNeeded("group", groupId);
+  else if (metaFor("group", groupId).hasMoreNewer) return; // scrolled up in history — will show up once they scroll back down
+  const list = arrayRefFor("group", groupId);
   list.push({
     id: extra.id ?? null,
     sender,
@@ -796,9 +1020,7 @@ function appendGroupMessage(groupId, sender, body, mine, type = "text", extra = 
     edited: false,
     reply: extra.reply || null,
   });
-  groupMessageCache.set(groupId, list);
-  const activeNow = isActiveGroup(groupId) && document.hasFocus();
-  bumpGroupPreview(groupId, body, type, { incrementUnread: type !== "system" && !mine && !activeNow });
+  trimIfNeeded("group", groupId);
   if (isActiveGroup(groupId)) renderThread();
 }
 
@@ -1832,16 +2054,6 @@ document.addEventListener("visibilitychange", reportFocusState);
 
   socket.on("global-message-deleted", ({ id }) => {
     if (removeGlobalMessage(id) && activeConversation && activeConversation.type === "global") {
-      renderThread();
-    }
-  });
-
-  // Sent whenever the server auto-trims global chat to free up storage.
-  // Just drop whichever of the pruned ids we happen to have cached/rendered.
-  socket.on("global-messages-pruned", ({ ids }) => {
-    if (!Array.isArray(ids) || !ids.length) return;
-    const anyRemoved = ids.map((id) => removeGlobalMessage(id)).some(Boolean);
-    if (anyRemoved && activeConversation && activeConversation.type === "global") {
       renderThread();
     }
   });

@@ -458,6 +458,12 @@ h1 {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* Grid/flex items default to min-height: auto, which means they refuse to
+     shrink below their content's natural height — so with enough
+     conversations, this column (and the page under it) just grows past
+     100vh instead of letting .conversation-list scroll internally. Pinning
+     this to 0 lets it actually respect the grid row's height. */
+  min-height: 0;
 }
 
 .chat-sidebar-header {
@@ -625,6 +631,10 @@ h1 {
 .conversation-list {
   flex: 1;
   overflow-y: auto;
+  /* Same min-height: auto issue as .chat-sidebar above — without this, a
+     long conversation list just pushes the column taller instead of
+     scrolling in place. */
+  min-height: 0;
 }
 
 .conversation-item {
@@ -1209,6 +1219,14 @@ img.avatar {
   font-size: 0.62rem;
   color: var(--bark);
   opacity: 0.75;
+}
+
+.msg-timestamp {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--bark);
+  opacity: 0.6;
+  white-space: nowrap;
 }
 
 .bubble.deleted {

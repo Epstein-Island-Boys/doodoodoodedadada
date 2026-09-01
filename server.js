@@ -115,6 +115,31 @@ async function initDb() {
   if (!globalMessageColumns.includes("reply_to_id")) {
     await db.execute("ALTER TABLE global_messages ADD COLUMN reply_to_id INTEGER");
   }
+  // Used by the archiving sweep below to find old rows quickly instead of a
+  // full table scan every run.
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_global_messages_created_at ON global_messages (created_at)");
+
+  // Global Chat can run up the row count fast since every user posts into
+  // the same table. Rather than deleting old messages (which would break
+  // "scroll up as far as you want"), anything older than
+  // GLOBAL_ARCHIVE_AFTER_DAYS gets moved into this twin table instead. It
+  // has the exact same shape but no extra indexes beyond its primary key, so
+  // the hot `global_messages` table — the one every read/write and reply
+  // lookup hits — stays small and fast no matter how much history piles up,
+  // while old messages stay fully intact and still load when someone scrolls
+  // back far enough (see fetchGlobalPage below, which stitches both tables
+  // together transparently).
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS global_messages_archive (
+      id INTEGER PRIMARY KEY,
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      body TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'text',
+      created_at TEXT NOT NULL,
+      edited_at TEXT,
+      reply_to_id INTEGER
+    )
+  `);
 
   // One-time cleanup: earlier versions of this app "deleted" a message by
   // blanking its body and flagging it, which still left a "Message deleted"
@@ -763,19 +788,21 @@ app.get("/api/messages/:username", requireAuth, async (req, res) => {
   const other = await getUserByUsername(req.params.username);
   if (!other) return res.status(404).json({ error: "No user with that username." });
 
-  const result = await db.execute({
-    sql: `SELECT m.id, m.sender_id, m.body, m.type, m.created_at, m.read_at, m.edited_at,
+  const { rows, hasMore } = await fetchMessagePage({
+    selectSql: `SELECT m.id, m.sender_id, m.body, m.type, m.created_at, m.read_at, m.edited_at,
                  m.reply_to_id, rm.id AS reply_row_id, rm.body AS reply_body, rm.type AS reply_type,
                  rm.sender_id AS reply_sender_id
           FROM messages m
           LEFT JOIN messages rm ON rm.id = m.reply_to_id
-          WHERE (m.sender_id = ? AND m.recipient_id = ?)
-             OR (m.sender_id = ? AND m.recipient_id = ?)
-          ORDER BY m.created_at ASC, m.id ASC`,
+          WHERE ((m.sender_id = ? AND m.recipient_id = ?) OR (m.sender_id = ? AND m.recipient_id = ?))`,
     args: [myId, other.id, other.id, myId],
+    idExpr: "m.id",
+    before: req.query.before != null ? Number(req.query.before) : null,
+    after: req.query.after != null ? Number(req.query.after) : null,
+    limit: req.query.limit,
   });
 
-  const messages = result.rows.map((r) => ({
+  const messages = rows.map((r) => ({
     id: r.id,
     body: r.body,
     type: r.type,
@@ -797,7 +824,7 @@ app.get("/api/messages/:username", requireAuth, async (req, res) => {
           }
       : null,
   }));
-  res.json({ messages });
+  res.json({ messages, hasMore });
 });
 
 // ---- Mark all of someone's messages to me as read ----------------------------
@@ -1302,20 +1329,23 @@ app.get("/api/groups/:id/messages", requireAuth, async (req, res) => {
   const myId = req.session.userId;
   if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
 
-  const result = await db.execute({
-    sql: `SELECT gm.id, gm.sender_id, su.username AS sender, su.name_color, su.avatar_image_id,
+  const { rows, hasMore } = await fetchMessagePage({
+    selectSql: `SELECT gm.id, gm.sender_id, su.username AS sender, su.name_color, su.avatar_image_id,
                  gm.body, gm.type, gm.created_at, gm.edited_at, gm.reply_to_id,
                  rg.id AS reply_row_id, rg.body AS reply_body, rg.type AS reply_type, ru.username AS reply_sender
           FROM group_messages gm
           LEFT JOIN users su ON su.id = gm.sender_id
           LEFT JOIN group_messages rg ON rg.id = gm.reply_to_id
           LEFT JOIN users ru ON ru.id = rg.sender_id
-          WHERE gm.group_id = ?
-          ORDER BY gm.created_at ASC, gm.id ASC`,
+          WHERE gm.group_id = ?`,
     args: [groupId],
+    idExpr: "gm.id",
+    before: req.query.before != null ? Number(req.query.before) : null,
+    after: req.query.after != null ? Number(req.query.after) : null,
+    limit: req.query.limit,
   });
 
-  const messages = result.rows.map((r) => ({
+  const messages = rows.map((r) => ({
     id: r.id,
     sender: r.type === "system" ? null : r.sender,
     nameColor: r.name_color || null,
@@ -1331,7 +1361,7 @@ app.get("/api/groups/:id/messages", requireAuth, async (req, res) => {
         : { id: r.reply_row_id, body: r.reply_body, type: r.reply_type, sender: r.reply_sender === req.session.username ? "me" : r.reply_sender }
       : null,
   }));
-  res.json({ messages });
+  res.json({ messages, hasMore });
 });
 
 app.post("/api/groups/:id/read", requireAuth, async (req, res) => {
@@ -1494,67 +1524,143 @@ app.post("/api/groups/:id/messages/image", requireAuth, (req, res) => {
 // One shared room everyone can post to and read. No block/mute filtering here
 // on purpose — those only govern DMs and DM notifications; the global room is
 // a public space everyone in it can see in full.
-const GLOBAL_HISTORY_LIMIT = 500;
+//
+// History is no longer pruned/deleted server-side. Instead the client keeps
+// a sliding window of at most HISTORY_INITIAL_LIMIT messages loaded at a
+// time (see fetchMessagePage below and the windowing logic in messages.js),
+// paging further back in HISTORY_PAGE_LIMIT-sized chunks as the user scrolls
+// up, and unloading the far end of the window as it goes. Same windowing is
+// used for DMs and group chats.
+const HISTORY_INITIAL_LIMIT = 300; // default page size for the first load of a thread
+const HISTORY_PAGE_LIMIT = 200; // default page size for a "load more" scroll page
+const HISTORY_MAX_LIMIT = 300; // hard ceiling on whatever limit a client requests
 
-// How many global messages we keep in the database at once. Every time
-// someone posts, we trim the room back down to this count by deleting the
-// oldest messages first — that's what keeps global chat from ever filling
-// up storage again. (Images are the expensive part, since their bytes live
-// in the `images` table, so when a pruned message was an image we delete
-// that row too instead of leaving an orphaned blob behind.)
-const MAX_GLOBAL_MESSAGES = 500;
+// Fetches one page of messages for a thread (global room, a DM, or a group),
+// keyed off a message id cursor instead of offset-based paging so results
+// stay stable even as new messages keep arriving.
+//   - No cursor: the newest `limit` messages.
+//   - `before`: the newest `limit` messages older than that id (scrolling up).
+//   - `after`: the oldest `limit` messages newer than that id (scrolling back down).
+// Always returns rows in ascending (oldest-first) order, plus `hasMore`
+// telling the caller whether there's another page in that direction.
+async function fetchMessagePage({ selectSql, args, idExpr, before, after, limit }) {
+  const clampedLimit = Math.min(Math.max(Number(limit) || HISTORY_INITIAL_LIMIT, 1), HISTORY_MAX_LIMIT);
+  let sql = selectSql;
+  const finalArgs = [...args];
+  if (before != null && Number.isFinite(before)) {
+    sql += ` AND ${idExpr} < ?`;
+    finalArgs.push(before);
+  } else if (after != null && Number.isFinite(after)) {
+    sql += ` AND ${idExpr} > ?`;
+    finalArgs.push(after);
+  }
+  const goingForward = after != null && Number.isFinite(after);
+  sql += ` ORDER BY ${idExpr} ${goingForward ? "ASC" : "DESC"} LIMIT ?`;
+  finalArgs.push(clampedLimit + 1);
 
-async function pruneGlobalMessages() {
-  // Find the ids of any messages beyond the newest MAX_GLOBAL_MESSAGES.
-  const overflow = await db.execute({
-    sql: `SELECT id, type, body FROM global_messages
-          ORDER BY created_at DESC, id DESC
-          LIMIT -1 OFFSET ?`,
-    args: [MAX_GLOBAL_MESSAGES],
-  });
-  if (overflow.rows.length === 0) return;
+  const result = await db.execute({ sql, args: finalArgs });
+  const hasMore = result.rows.length > clampedLimit;
+  let rows = hasMore ? result.rows.slice(0, clampedLimit) : result.rows;
+  if (!goingForward) rows = rows.reverse(); // newest-first fetch -> oldest-first for display
+  return { rows, hasMore };
+}
 
-  const idsToDelete = overflow.rows.map((r) => r.id);
-  const imageIdsToDelete = overflow.rows
-    .filter((r) => r.type === "image" && typeof r.body === "string")
-    .map((r) => r.body.match(/\/api\/images\/(\d+)/))
-    .filter(Boolean)
-    .map((m) => Number(m[1]));
+// ---- Global chat archiving --------------------------------------------------
+// Anything older than this moves from `global_messages` into
+// `global_messages_archive` (see initDb for why). Message ids are assigned
+// in insertion order and never reused, and archiving always sweeps the
+// oldest rows first, so at any moment every archived id is smaller than
+// every id still in the live table — the paging logic below leans on that.
+const GLOBAL_ARCHIVE_AFTER_DAYS = 7;
+const GLOBAL_ARCHIVE_SWEEP_INTERVAL_MS = 60 * 60 * 1000; // re-check hourly
 
-  // Any reply pointing at a message we're about to delete should just show
-  // "message removed" instead of a dangling foreign id.
-  const placeholders = idsToDelete.map(() => "?").join(",");
-  await db.execute({
-    sql: `DELETE FROM global_messages WHERE id IN (${placeholders})`,
-    args: idsToDelete,
-  });
+async function archiveOldGlobalMessages() {
+  const cutoffSql = `datetime('now', '-${GLOBAL_ARCHIVE_AFTER_DAYS} days')`;
+  const due = await db.execute(`SELECT COUNT(*) AS n FROM global_messages WHERE created_at < ${cutoffSql}`);
+  const count = Number(due.rows[0]?.n || 0);
+  if (count === 0) return;
+  await db.batch(
+    [
+      `INSERT INTO global_messages_archive (id, sender_id, body, type, created_at, edited_at, reply_to_id)
+       SELECT id, sender_id, body, type, created_at, edited_at, reply_to_id
+       FROM global_messages WHERE created_at < ${cutoffSql}`,
+      `DELETE FROM global_messages WHERE created_at < ${cutoffSql}`,
+    ],
+    "write"
+  );
+  console.log(`Archived ${count} global message(s) older than ${GLOBAL_ARCHIVE_AFTER_DAYS} days.`);
+}
 
-  if (imageIdsToDelete.length) {
-    const imgPlaceholders = imageIdsToDelete.map(() => "?").join(",");
-    await db.execute({
-      sql: `DELETE FROM images WHERE id IN (${imgPlaceholders})`,
-      args: imageIdsToDelete,
-    });
+async function archiveHasAnyRows() {
+  const r = await db.execute("SELECT EXISTS(SELECT 1 FROM global_messages_archive) AS has");
+  return Boolean(r.rows[0]?.has);
+}
+
+// Builds the same shaped SELECT against either the live or archive table.
+// Reply lookups check both tables (a live message can reply to one that's
+// since been archived), via a small UNION'd subquery.
+function globalSelectSql(table) {
+  return `SELECT g.id, g.sender_id, u.username AS sender, u.name_color, u.avatar_image_id,
+             g.body, g.type, g.created_at, g.edited_at, g.reply_to_id,
+             rg.id AS reply_row_id, rg.body AS reply_body, rg.type AS reply_type,
+             ru.username AS reply_sender
+          FROM ${table} g
+          JOIN users u ON u.id = g.sender_id
+          LEFT JOIN (
+            SELECT id, sender_id, body, type FROM global_messages
+            UNION ALL
+            SELECT id, sender_id, body, type FROM global_messages_archive
+          ) rg ON rg.id = g.reply_to_id
+          LEFT JOIN users ru ON ru.id = rg.sender_id
+          WHERE 1=1`;
+}
+
+// Pages through Global Chat history across the live + archive tables as one
+// continuous timeline, so "scroll up forever" keeps working exactly as
+// before even once old messages have been archived off.
+async function fetchGlobalPage({ before, after, limit }) {
+  const clampedLimit = Math.min(Math.max(Number(limit) || HISTORY_INITIAL_LIMIT, 1), HISTORY_MAX_LIMIT);
+  const pageFromTable = (table, opts) =>
+    fetchMessagePage({ selectSql: globalSelectSql(table), args: [], idExpr: "g.id", limit: clampedLimit, ...opts });
+
+  if (before != null && Number.isFinite(before)) {
+    const live = await pageFromTable("global_messages", { before });
+    if (live.rows.length >= clampedLimit) {
+      return { rows: live.rows, hasMore: live.hasMore || (await archiveHasAnyRows()) };
+    }
+    const archiveBefore = live.rows.length ? live.rows[0].id : before;
+    const archive = await pageFromTable("global_messages_archive", { before: archiveBefore, limit: clampedLimit - live.rows.length });
+    return { rows: [...archive.rows, ...live.rows], hasMore: archive.hasMore };
   }
 
-  broadcastGlobalAll("global-messages-pruned", { ids: idsToDelete });
+  if (after != null && Number.isFinite(after)) {
+    const archive = await pageFromTable("global_messages_archive", { after });
+    if (archive.rows.length >= clampedLimit) {
+      return { rows: archive.rows, hasMore: true }; // the whole live table is still ahead
+    }
+    const liveAfter = archive.rows.length ? archive.rows[archive.rows.length - 1].id : after;
+    const live = await pageFromTable("global_messages", { after: liveAfter, limit: clampedLimit - archive.rows.length });
+    return { rows: [...archive.rows, ...live.rows], hasMore: live.hasMore };
+  }
+
+  // No cursor: newest messages. Almost always satisfied entirely by the
+  // live table; only a young/quiet room needs archive rows to fill the page.
+  const live = await pageFromTable("global_messages", {});
+  if (live.rows.length >= clampedLimit) {
+    return { rows: live.rows, hasMore: live.hasMore || (await archiveHasAnyRows()) };
+  }
+  const archiveBefore = live.rows.length ? live.rows[0].id : null;
+  const archive = await pageFromTable("global_messages_archive", { before: archiveBefore, limit: clampedLimit - live.rows.length });
+  return { rows: [...archive.rows, ...live.rows], hasMore: archive.hasMore };
 }
 
 app.get("/api/global/messages", requireAuth, async (req, res) => {
-  const result = await db.execute({
-    sql: `SELECT g.id, g.sender_id, u.username AS sender, u.name_color, u.avatar_image_id,
-                 g.body, g.type, g.created_at, g.edited_at, g.reply_to_id,
-                 rg.id AS reply_row_id, rg.body AS reply_body, rg.type AS reply_type,
-                 ru.username AS reply_sender
-          FROM global_messages g
-          JOIN users u ON u.id = g.sender_id
-          LEFT JOIN global_messages rg ON rg.id = g.reply_to_id
-          LEFT JOIN users ru ON ru.id = rg.sender_id
-          ORDER BY g.created_at ASC, g.id ASC
-          LIMIT ?`,
-    args: [GLOBAL_HISTORY_LIMIT],
+  const { rows, hasMore } = await fetchGlobalPage({
+    before: req.query.before != null ? Number(req.query.before) : null,
+    after: req.query.after != null ? Number(req.query.after) : null,
+    limit: req.query.limit,
   });
-  const messages = result.rows.map((r) => ({
+  const messages = rows.map((r) => ({
     id: r.id,
     sender: r.sender,
     nameColor: r.name_color || null,
@@ -1570,7 +1676,7 @@ app.get("/api/global/messages", requireAuth, async (req, res) => {
         : { id: r.reply_row_id, body: r.reply_body, type: r.reply_type, sender: r.reply_sender }
       : null,
   }));
-  res.json({ messages });
+  res.json({ messages, hasMore });
 });
 
 function broadcastGlobal(payload, exceptUserId) {
@@ -1602,9 +1708,15 @@ app.post("/api/global/messages", requireAuth, async (req, res) => {
   let replyToId = null;
   let replyPreview = null;
   if (replyTo != null) {
+    // The message being replied to may have aged into the archive table by
+    // now, so check both.
     const replyResult = await db.execute({
       sql: `SELECT g.id, g.body, g.type, u.username AS sender
-            FROM global_messages g JOIN users u ON u.id = g.sender_id
+            FROM (
+              SELECT id, sender_id, body, type FROM global_messages
+              UNION ALL
+              SELECT id, sender_id, body, type FROM global_messages_archive
+            ) g JOIN users u ON u.id = g.sender_id
             WHERE g.id = ?`,
       args: [Number(replyTo)],
     });
@@ -1645,7 +1757,6 @@ app.post("/api/global/messages", requireAuth, async (req, res) => {
   };
   broadcastGlobal(payload, myId);
   res.json({ ok: true, message: payload });
-  pruneGlobalMessages().catch((e) => console.error("prune (global text) failed:", e));
 });
 
 // ---- Edit / unsend a global message -------------------------------------------
@@ -1760,7 +1871,6 @@ app.post("/api/global/messages/image", requireAuth, (req, res) => {
       };
       broadcastGlobal(payload, myId);
       res.json({ ok: true, message: payload });
-      pruneGlobalMessages().catch((e) => console.error("prune (global image) failed:", e));
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: "Upload failed." });
@@ -1909,11 +2019,16 @@ io.on("connection", (socket) => {
 });
 
 initDb()
-  .then(() => pruneGlobalMessages())
   .then(() => {
     server.listen(PORT, () => {
       console.log(`Server running at http://localhost:${PORT}`);
     });
+    // Sweep once at boot, then keep checking hourly — cheap when nothing's
+    // due (see the COUNT(*) check at the top of archiveOldGlobalMessages).
+    archiveOldGlobalMessages().catch((err) => console.error("Global chat archive sweep failed:", err));
+    setInterval(() => {
+      archiveOldGlobalMessages().catch((err) => console.error("Global chat archive sweep failed:", err));
+    }, GLOBAL_ARCHIVE_SWEEP_INTERVAL_MS);
   })
   .catch((err) => {
     console.error("Failed to initialize database:", err);
