@@ -1377,23 +1377,56 @@ function syncAudioPlayerUI(audio) {
   const pauseIcon = player.querySelector(".audio-player-icon-pause");
   const btn = player.querySelector("[data-audio-toggle]");
 
-  const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+  // Chrome (and Chromium-based browsers) frequently report Infinity for
+  // the duration of a MediaRecorder-produced webm/opus clip, since the
+  // container's duration header is never written for a live-recorded
+  // stream. Treat that the same as "not known yet" rather than as 0, or
+  // the bar and time never recover once the real duration is resolved
+  // (see fixInfiniteDuration below, which is what actually resolves it).
+  const durKnown = Number.isFinite(audio.duration) && audio.duration > 0;
+  const dur = durKnown ? audio.duration : 0;
   const cur = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-  if (fill) fill.style.width = dur > 0 ? `${Math.min(100, (cur / dur) * 100)}%` : "0%";
+  if (fill) fill.style.width = durKnown ? `${Math.min(100, (cur / dur) * 100)}%` : "0%";
   if (elapsed) elapsed.textContent = formatAudioTime(cur);
-  if (duration) duration.textContent = formatAudioTime(dur);
+  if (duration) duration.textContent = durKnown ? formatAudioTime(dur) : "…";
   const playing = !audio.paused && !audio.ended;
   if (playIcon) playIcon.classList.toggle("is-hidden", playing);
   if (pauseIcon) pauseIcon.classList.toggle("is-hidden", !playing);
   if (btn) btn.setAttribute("aria-label", playing ? "Pause" : "Play");
 }
 
-["loadedmetadata", "timeupdate", "play", "pause", "ended"].forEach((evt) => {
+// Chrome-recorded webm/opus blobs (the common case for our voice/video
+// recorder) report `duration: Infinity` until the browser is forced to
+// scan the file — seeking to a huge timestamp triggers that scan, after
+// which the real duration is available. Without this, the scrub bar and
+// time readout stay frozen forever ("…" / stuck at 0%) even though
+// playback itself works fine — which is what made these look broken.
+// See: https://bugs.chromium.org/p/chromium/issues/detail?id=642012
+const durationFixApplied = new WeakSet();
+function fixInfiniteDuration(audio) {
+  if (durationFixApplied.has(audio)) return;
+  if (audio.duration !== Infinity) return;
+  durationFixApplied.add(audio);
+  const resumeAt = audio.currentTime;
+  audio.currentTime = 1e101;
+  const onTimeUpdate = () => {
+    audio.removeEventListener("timeupdate", onTimeUpdate);
+    audio.currentTime = resumeAt;
+    syncAudioPlayerUI(audio);
+  };
+  audio.addEventListener("timeupdate", onTimeUpdate);
+}
+
+["loadedmetadata", "durationchange", "timeupdate", "play", "pause", "ended"].forEach((evt) => {
   els.thread.addEventListener(
     evt,
     (e) => {
       if (e.target instanceof HTMLAudioElement && e.target.closest(".audio-player")) {
-        syncAudioPlayerUI(e.target);
+        const audio = e.target;
+        if ((evt === "loadedmetadata" || evt === "durationchange") && audio.duration === Infinity) {
+          fixInfiniteDuration(audio);
+        }
+        syncAudioPlayerUI(audio);
       }
     },
     true
@@ -1846,6 +1879,11 @@ async function sendRecordedMedia(blob, kind) {
   const formData = new FormData();
   if (to) formData.append("to", to);
   formData.append(kind, blob, filenameForBlob(blob, kind));
+  // Belt-and-suspenders: some browsers/in-app webviews don't reliably carry
+  // the Blob's `type` through onto the multipart part's Content-Type header
+  // the server sees, so send it again as a plain field the server can fall
+  // back on if that happens.
+  formData.append("mimeType", blob.type || "");
 
   try {
     const uploadUrl = isGlobal

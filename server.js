@@ -295,6 +295,18 @@ function baseMimeType(mimeType) {
   return String(mimeType || "").split(";")[0].trim().toLowerCase();
 }
 
+// Some browsers (older Android WebViews, a few in-app browsers) don't
+// reliably carry the recorded Blob's real `type` through onto the
+// multipart part's Content-Type header — multer then reports it as
+// "application/octet-stream" or leaves it blank, even though the bytes
+// are a perfectly good recording. Treat that the same as "unknown but
+// probably fine" rather than bouncing the upload, since this endpoint
+// only ever receives what our own recorder produced.
+function isGenericMimeType(mimeType) {
+  const base = baseMimeType(mimeType);
+  return base === "" || base === "application/octet-stream" || base === "binary/octet-stream";
+}
+
 // Voice messages, recorded in-browser with MediaRecorder. Kept well under
 // the video limit below since these are meant to be quick clips, not long
 // recordings.
@@ -302,14 +314,16 @@ function baseMimeType(mimeType) {
 // Rather than hardcode an exact allowlist of container/codec strings — which
 // varies by browser and kept rejecting perfectly valid recordings (Firefox,
 // Safari and Chrome each report slightly different mimetypes) — accept
-// anything the browser genuinely declares as audio/*. It's an authenticated,
-// same-origin upload; there's no meaningful security gain from guessing
-// codec strings, only false rejections.
+// anything the browser genuinely declares as audio/*, plus the generic/blank
+// case above. It's an authenticated, same-origin upload; there's no
+// meaningful security gain from guessing codec strings, only false
+// rejections. Reject only mimetypes that are clearly some other media kind
+// (image/*, video/*, etc).
 const uploadAudio = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
-    if (!baseMimeType(file.mimetype).startsWith("audio/")) {
+    if (!baseMimeType(file.mimetype).startsWith("audio/") && !isGenericMimeType(file.mimetype)) {
       return cb(new Error("That audio format isn't supported."));
     }
     cb(null, true);
@@ -317,17 +331,34 @@ const uploadAudio = multer({
 });
 
 // Selfie-cam video clips, also recorded in-browser with MediaRecorder. Same
-// reasoning as uploadAudio above — accept any real video/* type.
+// reasoning as uploadAudio above — accept any real video/* type, plus the
+// generic/blank case.
 const uploadVideo = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
   fileFilter: (req, file, cb) => {
-    if (!baseMimeType(file.mimetype).startsWith("video/")) {
+    if (!baseMimeType(file.mimetype).startsWith("video/") && !isGenericMimeType(file.mimetype)) {
       return cb(new Error("That video format isn't supported."));
     }
     cb(null, true);
   },
 });
+
+// When a file's mimetype came through as one of the generic values above,
+// pick a real, playable media type to store instead — the DB column and
+// every <audio>/<video> tag downstream needs a genuine mime type, not
+// "application/octet-stream", or playback breaks even though the upload
+// itself succeeded. Prefers the mimeType the client sent as a plain form
+// field (the Blob's real .type, in case the multipart Content-Type got
+// mangled in transit) before falling back to whatever MediaRecorder
+// defaults to in the overwhelming majority of browsers for that kind of
+// clip.
+function resolveStoredMimeType(mimeType, reportedMimeType, expectedPrefix, fallback) {
+  if (!isGenericMimeType(mimeType)) return mimeType;
+  const reportedBase = baseMimeType(reportedMimeType);
+  if (reportedBase.startsWith(expectedPrefix)) return reportedMimeType;
+  return fallback;
+}
 
 // ---- Sessions ---------------------------------------------------------------
 // Kept in its own variable so the same middleware instance can also run
@@ -1126,7 +1157,7 @@ app.post("/api/messages/audio", requireAuth, (req, res) => {
         return res.status(403).json({ error: "You can't message this user." });
       }
 
-      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+      const url = await storeMediaBlob(resolveStoredMimeType(req.file.mimetype, req.body && req.body.mimeType, "audio/", "audio/webm"), req.file.buffer, myId);
 
       const info = await db.execute({
         sql: "INSERT INTO messages (sender_id, recipient_id, body, type) VALUES (?, ?, ?, 'audio')",
@@ -1181,7 +1212,7 @@ app.post("/api/messages/video", requireAuth, (req, res) => {
         return res.status(403).json({ error: "You can't message this user." });
       }
 
-      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+      const url = await storeMediaBlob(resolveStoredMimeType(req.file.mimetype, req.body && req.body.mimeType, "video/", "video/webm"), req.file.buffer, myId);
 
       const info = await db.execute({
         sql: "INSERT INTO messages (sender_id, recipient_id, body, type) VALUES (?, ?, ?, 'video')",
@@ -1697,7 +1728,7 @@ app.post("/api/groups/:id/messages/audio", requireAuth, (req, res) => {
     try {
       if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
 
-      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+      const url = await storeMediaBlob(resolveStoredMimeType(req.file.mimetype, req.body && req.body.mimeType, "audio/", "audio/webm"), req.file.buffer, myId);
 
       const info = await db.execute({
         sql: "INSERT INTO group_messages (group_id, sender_id, body, type) VALUES (?, ?, ?, 'audio')",
@@ -1736,7 +1767,7 @@ app.post("/api/groups/:id/messages/video", requireAuth, (req, res) => {
     try {
       if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
 
-      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+      const url = await storeMediaBlob(resolveStoredMimeType(req.file.mimetype, req.body && req.body.mimeType, "video/", "video/webm"), req.file.buffer, myId);
 
       const info = await db.execute({
         sql: "INSERT INTO group_messages (group_id, sender_id, body, type) VALUES (?, ?, ?, 'video')",
@@ -2130,7 +2161,7 @@ app.post("/api/global/messages/audio", requireAuth, (req, res) => {
 
     try {
       const myId = req.session.userId;
-      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+      const url = await storeMediaBlob(resolveStoredMimeType(req.file.mimetype, req.body && req.body.mimeType, "audio/", "audio/webm"), req.file.buffer, myId);
 
       const info = await db.execute({
         sql: "INSERT INTO global_messages (sender_id, body, type) VALUES (?, ?, 'audio')",
@@ -2173,7 +2204,7 @@ app.post("/api/global/messages/video", requireAuth, (req, res) => {
 
     try {
       const myId = req.session.userId;
-      const url = await storeMediaBlob(req.file.mimetype, req.file.buffer, myId);
+      const url = await storeMediaBlob(resolveStoredMimeType(req.file.mimetype, req.body && req.body.mimeType, "video/", "video/webm"), req.file.buffer, myId);
 
       const info = await db.execute({
         sql: "INSERT INTO global_messages (sender_id, body, type) VALUES (?, ?, 'video')",
