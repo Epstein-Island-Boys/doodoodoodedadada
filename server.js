@@ -150,12 +150,43 @@ async function initDb() {
       PRIMARY KEY (owner_id, target_id)
     )
   `);
-  // Group chat feature removed. Drop the tables entirely so any
-  // pre-existing group chats and their messages are permanently deleted.
+  // Group chats: DM-like multi-person threads. Started from the same
+  // "message a username" box by separating names with commas (see
+  // POST /api/groups below). Aesthetically these borrow from Global Chat
+  // (sender name + avatar on every bubble) and from DMs (replies, edit/
+  // unsend, per-person read tracking).
   await db.execute(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
-  await db.execute("DROP TABLE IF EXISTS group_messages");
-  await db.execute("DROP TABLE IF EXISTS group_members");
-  await db.execute("DROP TABLE IF EXISTS group_chats");
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS group_chats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      created_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id INTEGER NOT NULL REFERENCES group_chats(id),
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_read_at TEXT,
+      PRIMARY KEY (group_id, user_id)
+    )
+  `);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (user_id)");
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS group_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL REFERENCES group_chats(id),
+      sender_id INTEGER NOT NULL REFERENCES users(id),
+      body TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'text',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      edited_at TEXT,
+      reply_to_id INTEGER
+    )
+  `);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, created_at)");
 
   // Images now live in Turso too (as blobs), instead of the local /uploads
   // folder, which had the same disappears-on-redeploy problem as the old
@@ -990,6 +1021,475 @@ app.post("/api/messages/image", requireAuth, (req, res) => {
   });
 });
 
+// ---- Group chats ----------------------------------------------------------
+async function isGroupMember(groupId, userId) {
+  if (!Number.isInteger(groupId)) return false;
+  const r = await db.execute({
+    sql: "SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?",
+    args: [groupId, userId],
+  });
+  return r.rows.length > 0;
+}
+
+async function getGroupMembers(groupId) {
+  const r = await db.execute({
+    sql: `SELECT u.id, u.username, u.name_color, u.avatar_image_id
+          FROM group_members gm JOIN users u ON u.id = gm.user_id
+          WHERE gm.group_id = ?
+          ORDER BY u.username COLLATE NOCASE`,
+    args: [groupId],
+  });
+  return r.rows;
+}
+
+function groupMemberSummary(members) {
+  return members.map((m) => ({
+    username: m.username,
+    nameColor: m.name_color || null,
+    avatarUrl: avatarUrlFor(m.avatar_image_id),
+  }));
+}
+
+// Sends `event` to every current member's live sockets (all their open
+// tabs/devices), optionally skipping one user id — the same pattern DMs use
+// for pushing a message straight to the recipient.
+async function broadcastToGroup(groupId, event, payload, exceptUserId) {
+  const members = await getGroupMembers(groupId);
+  for (const m of members) {
+    if (exceptUserId != null && m.id === exceptUserId) continue;
+    for (const socketId of onlineSockets.get(m.id) || []) {
+      io.to(socketId).emit(event, payload);
+    }
+  }
+}
+
+// A lightweight "X added Y" / "X renamed the group" / "X left" line, stored
+// as a real row (type 'system') so it sits in history in order like any
+// other message, but rendered without a bubble or actions on the client.
+async function insertGroupSystemMessage(groupId, actingUserId, body) {
+  const info = await db.execute({
+    sql: "INSERT INTO group_messages (group_id, sender_id, body, type) VALUES (?, ?, ?, 'system')",
+    args: [groupId, actingUserId, body],
+  });
+  const createdResult = await db.execute({
+    sql: "SELECT created_at FROM group_messages WHERE id = ?",
+    args: [insertedId(info)],
+  });
+  return { id: insertedId(info), created_at: createdResult.rows[0].created_at, body };
+}
+
+async function broadcastGroupSystemMessage(groupId, actingUserId, body) {
+  const sys = await insertGroupSystemMessage(groupId, actingUserId, body);
+  await broadcastToGroup(groupId, "group-message", {
+    groupId,
+    id: sys.id,
+    sender: null,
+    nameColor: null,
+    avatarUrl: null,
+    body: sys.body,
+    type: "system",
+    created_at: sys.created_at,
+    reply: null,
+  });
+}
+
+// ---- Create a group chat ----------------------------------------------------
+// Called from the same "message a username" box: separating names with
+// commas turns a DM into a group instead. Requires at least two other
+// people (one other person is just a DM).
+app.post("/api/groups", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const { usernames } = req.body || {};
+  if (!Array.isArray(usernames)) {
+    return res.status(400).json({ error: "A list of usernames is required." });
+  }
+  const wanted = [
+    ...new Map(
+      usernames
+        .map((u) => String(u || "").trim())
+        .filter(Boolean)
+        .map((u) => [usernameLower(u), u])
+    ).values(),
+  ].filter((u) => usernameLower(u) !== usernameLower(req.session.username));
+  if (wanted.length < 2) {
+    return res.status(400).json({ error: "Add at least two other people to start a group." });
+  }
+
+  const found = [];
+  const missing = [];
+  for (const uname of wanted) {
+    const u = await getUserByUsername(uname);
+    if (u) found.push(u);
+    else missing.push(uname);
+  }
+  if (missing.length) {
+    return res.status(404).json({ error: `No user${missing.length > 1 ? "s" : ""} named ${missing.join(", ")}.` });
+  }
+
+  const info = await db.execute({
+    sql: "INSERT INTO group_chats (name, created_by) VALUES (NULL, ?)",
+    args: [myId],
+  });
+  const groupId = insertedId(info);
+
+  for (const uid of [myId, ...found.map((u) => u.id)]) {
+    await db.execute({
+      sql: "INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)",
+      args: [groupId, uid],
+    });
+  }
+
+  const members = await getGroupMembers(groupId);
+  const payload = { id: groupId, name: null, members: groupMemberSummary(members) };
+
+  // Push the new group into everyone else's sidebar live.
+  await broadcastToGroup(groupId, "group-updated", payload, myId);
+  await broadcastGroupSystemMessage(groupId, myId, `${req.session.username} started the group.`);
+
+  res.json({ ok: true, group: payload });
+});
+
+// One row per group the caller is in, most recently active first, with a
+// last-message preview and unread count — mirrors /api/conversations.
+app.get("/api/groups", requireAuth, async (req, res) => {
+  const myId = req.session.userId;
+  const rowsResult = await db.execute({
+    sql: `SELECT gc.id, gc.name, gm.last_read_at
+          FROM group_chats gc JOIN group_members gm ON gm.group_id = gc.id
+          WHERE gm.user_id = ?`,
+    args: [myId],
+  });
+
+  const groups = [];
+  for (const row of rowsResult.rows) {
+    const members = await getGroupMembers(row.id);
+    const lastResult = await db.execute({
+      sql: "SELECT body, type, created_at FROM group_messages WHERE group_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+      args: [row.id],
+    });
+    const last = lastResult.rows[0] || null;
+    const unreadResult = await db.execute({
+      sql: row.last_read_at
+        ? "SELECT COUNT(*) AS c FROM group_messages WHERE group_id = ? AND sender_id != ? AND type != 'system' AND created_at > ?"
+        : "SELECT COUNT(*) AS c FROM group_messages WHERE group_id = ? AND sender_id != ? AND type != 'system'",
+      args: row.last_read_at ? [row.id, myId, row.last_read_at] : [row.id, myId],
+    });
+    groups.push({
+      id: row.id,
+      name: row.name || null,
+      members: groupMemberSummary(members),
+      lastMessage: last ? { body: last.body, type: last.type, created_at: last.created_at } : null,
+      unread: Number(unreadResult.rows[0]?.c || 0),
+    });
+  }
+
+  groups.sort((a, b) => (b.lastMessage?.created_at || "").localeCompare(a.lastMessage?.created_at || ""));
+  res.json({ groups });
+});
+
+app.get("/api/groups/:id", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  if (!(await isGroupMember(groupId, req.session.userId))) return res.status(404).json({ error: "Group not found." });
+  const gResult = await db.execute({ sql: "SELECT id, name FROM group_chats WHERE id = ?", args: [groupId] });
+  const g = gResult.rows[0];
+  if (!g) return res.status(404).json({ error: "Group not found." });
+  const members = await getGroupMembers(groupId);
+  res.json({ id: g.id, name: g.name || null, members: groupMemberSummary(members) });
+});
+
+// ---- Rename a group -----------------------------------------------------------
+app.patch("/api/groups/:id", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  let { name } = req.body || {};
+  if (name != null) {
+    name = String(name).trim().slice(0, 60);
+    if (!name) name = null;
+  }
+  await db.execute({ sql: "UPDATE group_chats SET name = ? WHERE id = ?", args: [name, groupId] });
+
+  const members = await getGroupMembers(groupId);
+  const payload = { id: groupId, name: name || null, members: groupMemberSummary(members) };
+  await broadcastToGroup(groupId, "group-updated", payload);
+  await broadcastGroupSystemMessage(
+    groupId,
+    myId,
+    name ? `${req.session.username} renamed the group to "${name}".` : `${req.session.username} reset the group name.`
+  );
+
+  res.json({ ok: true, name: name || null });
+});
+
+// ---- Add people to a group -----------------------------------------------------
+app.post("/api/groups/:id/members", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  const { usernames } = req.body || {};
+  if (!Array.isArray(usernames) || !usernames.length) {
+    return res.status(400).json({ error: "At least one username is required." });
+  }
+
+  const existing = await getGroupMembers(groupId);
+  const existingLower = new Set(existing.map((m) => usernameLower(m.username)));
+  const wanted = [...new Set(usernames.map((u) => String(u || "").trim()).filter(Boolean))];
+
+  const added = [];
+  const missing = [];
+  for (const uname of wanted) {
+    if (existingLower.has(usernameLower(uname))) continue;
+    const u = await getUserByUsername(uname);
+    if (!u) {
+      missing.push(uname);
+      continue;
+    }
+    await db.execute({
+      sql: "INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)",
+      args: [groupId, u.id],
+    });
+    added.push(u.username);
+    existingLower.add(usernameLower(u.username));
+  }
+  if (missing.length) {
+    return res.status(404).json({ error: `No user${missing.length > 1 ? "s" : ""} named ${missing.join(", ")}.` });
+  }
+  if (!added.length) {
+    return res.status(400).json({ error: "Everyone listed is already in this group." });
+  }
+
+  const members = await getGroupMembers(groupId);
+  const gResult = await db.execute({ sql: "SELECT name FROM group_chats WHERE id = ?", args: [groupId] });
+  const payload = { id: groupId, name: gResult.rows[0]?.name || null, members: groupMemberSummary(members) };
+  await broadcastToGroup(groupId, "group-updated", payload);
+  await broadcastGroupSystemMessage(groupId, myId, `${req.session.username} added ${added.join(", ")} to the group.`);
+
+  res.json({ ok: true, added, group: payload });
+});
+
+// ---- Leave a group --------------------------------------------------------------
+app.post("/api/groups/:id/leave", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  await db.execute({ sql: "DELETE FROM group_members WHERE group_id = ? AND user_id = ?", args: [groupId, myId] });
+  const remaining = await getGroupMembers(groupId);
+
+  if (remaining.length === 0) {
+    // Nobody left in it — clean the group up entirely rather than leaving
+    // an orphaned, invisible group and its messages behind forever.
+    await db.execute({ sql: "DELETE FROM group_messages WHERE group_id = ?", args: [groupId] });
+    await db.execute({ sql: "DELETE FROM group_chats WHERE id = ?", args: [groupId] });
+    return res.json({ ok: true });
+  }
+
+  await broadcastToGroup(groupId, "group-member-left", {
+    id: groupId,
+    username: req.session.username,
+    members: groupMemberSummary(remaining),
+  });
+  await broadcastGroupSystemMessage(groupId, myId, `${req.session.username} left the group.`);
+
+  res.json({ ok: true });
+});
+
+// ---- Group message history -------------------------------------------------------
+app.get("/api/groups/:id/messages", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  const result = await db.execute({
+    sql: `SELECT gm.id, gm.sender_id, su.username AS sender, su.name_color, su.avatar_image_id,
+                 gm.body, gm.type, gm.created_at, gm.edited_at, gm.reply_to_id,
+                 rg.id AS reply_row_id, rg.body AS reply_body, rg.type AS reply_type, ru.username AS reply_sender
+          FROM group_messages gm
+          LEFT JOIN users su ON su.id = gm.sender_id
+          LEFT JOIN group_messages rg ON rg.id = gm.reply_to_id
+          LEFT JOIN users ru ON ru.id = rg.sender_id
+          WHERE gm.group_id = ?
+          ORDER BY gm.created_at ASC, gm.id ASC`,
+    args: [groupId],
+  });
+
+  const messages = result.rows.map((r) => ({
+    id: r.id,
+    sender: r.type === "system" ? null : r.sender,
+    nameColor: r.name_color || null,
+    avatarUrl: avatarUrlFor(r.avatar_image_id),
+    body: r.body,
+    type: r.type,
+    created_at: r.created_at,
+    edited: r.edited_at != null,
+    mine: r.type !== "system" && r.sender === req.session.username,
+    reply: r.reply_to_id
+      ? r.reply_row_id == null
+        ? { removed: true }
+        : { id: r.reply_row_id, body: r.reply_body, type: r.reply_type, sender: r.reply_sender === req.session.username ? "me" : r.reply_sender }
+      : null,
+  }));
+  res.json({ messages });
+});
+
+app.post("/api/groups/:id/read", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+  await db.execute({
+    sql: "UPDATE group_members SET last_read_at = datetime('now') WHERE group_id = ? AND user_id = ?",
+    args: [groupId, myId],
+  });
+  res.json({ ok: true });
+});
+
+// ---- Send a group message --------------------------------------------------------
+app.post("/api/groups/:id/messages", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  const { body, replyTo } = req.body || {};
+  const requestedType = ["text", "youtube", "gif"].includes(req.body?.type) ? req.body.type : "text";
+  if (typeof body !== "string" || !body.trim()) return res.status(400).json({ error: "A message body is required." });
+  if (body.length > 2000) return res.status(400).json({ error: "Messages are limited to 2000 characters." });
+
+  let replyToId = null;
+  let replyPreview = null;
+  if (replyTo != null) {
+    const replyResult = await db.execute({
+      sql: `SELECT gm.id, gm.body, gm.type, u.username AS sender
+            FROM group_messages gm LEFT JOIN users u ON u.id = gm.sender_id
+            WHERE gm.id = ? AND gm.group_id = ?`,
+      args: [Number(replyTo), groupId],
+    });
+    const replied = replyResult.rows[0];
+    if (replied) {
+      replyToId = replied.id;
+      replyPreview = {
+        id: replied.id,
+        body: replied.body,
+        type: replied.type,
+        sender: replied.sender === req.session.username ? "me" : replied.sender,
+      };
+    }
+  }
+
+  let trimmedBody = body.trim();
+  const messageType = requestedType;
+  if (messageType === "gif") trimmedBody = await storeRemoteGif(trimmedBody, myId);
+  const info = await db.execute({
+    sql: "INSERT INTO group_messages (group_id, sender_id, body, type, reply_to_id) VALUES (?, ?, ?, ?, ?)",
+    args: [groupId, myId, trimmedBody, messageType, replyToId],
+  });
+  const createdResult = await db.execute({ sql: "SELECT created_at FROM group_messages WHERE id = ?", args: [insertedId(info)] });
+  const meRow = await getUserByUsername(req.session.username);
+
+  const payload = {
+    groupId,
+    id: insertedId(info),
+    sender: req.session.username,
+    nameColor: meRow?.name_color || null,
+    avatarUrl: avatarUrlFor(meRow?.avatar_image_id),
+    body: trimmedBody,
+    type: messageType,
+    created_at: createdResult.rows[0].created_at,
+    reply: replyPreview,
+  };
+  await broadcastToGroup(groupId, "group-message", payload, myId);
+  res.json({ ok: true, message: payload });
+});
+
+async function getOwnedGroupMessage(groupId, id, myId) {
+  const result = await db.execute({
+    sql: "SELECT id, sender_id, type FROM group_messages WHERE id = ? AND group_id = ?",
+    args: [id, groupId],
+  });
+  const row = result.rows[0];
+  if (!row || row.sender_id !== myId) return null;
+  return row;
+}
+
+app.patch("/api/groups/:id/messages/:msgId", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  const id = Number(req.params.msgId);
+  const { body } = req.body || {};
+  if (typeof body !== "string" || !body.trim()) return res.status(400).json({ error: "A message body is required." });
+  if (body.length > 2000) return res.status(400).json({ error: "Messages are limited to 2000 characters." });
+
+  const msg = await getOwnedGroupMessage(groupId, id, myId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+  if (msg.type !== "text") return res.status(400).json({ error: "Only text messages can be edited." });
+
+  const trimmedBody = body.trim();
+  await db.execute({ sql: "UPDATE group_messages SET body = ?, edited_at = datetime('now') WHERE id = ?", args: [trimmedBody, id] });
+  await broadcastToGroup(groupId, "group-message-edited", { groupId, id, body: trimmedBody });
+  res.json({ ok: true, message: { id, body: trimmedBody } });
+});
+
+app.delete("/api/groups/:id/messages/:msgId", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  const id = Number(req.params.msgId);
+  const msg = await getOwnedGroupMessage(groupId, id, myId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+
+  await db.execute({ sql: "DELETE FROM group_messages WHERE id = ?", args: [id] });
+  await broadcastToGroup(groupId, "group-message-deleted", { groupId, id });
+  res.json({ ok: true, id });
+});
+
+// ---- Send a group image message --------------------------------------------------
+app.post("/api/groups/:id/messages/image", requireAuth, (req, res) => {
+  upload.single("image")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No image provided." });
+
+    const groupId = Number(req.params.id);
+    const myId = req.session.userId;
+    try {
+      if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+      const imageInfo = await db.execute({
+        sql: "INSERT INTO images (mime_type, data, uploaded_by) VALUES (?, ?, ?)",
+        args: [req.file.mimetype, req.file.buffer, myId],
+      });
+      const url = "/api/images/" + insertedId(imageInfo);
+
+      const info = await db.execute({
+        sql: "INSERT INTO group_messages (group_id, sender_id, body, type) VALUES (?, ?, ?, 'image')",
+        args: [groupId, myId, url],
+      });
+      const createdResult = await db.execute({ sql: "SELECT created_at FROM group_messages WHERE id = ?", args: [insertedId(info)] });
+      const meRow = await getUserByUsername(req.session.username);
+
+      const payload = {
+        groupId,
+        id: insertedId(info),
+        sender: req.session.username,
+        nameColor: meRow?.name_color || null,
+        avatarUrl: avatarUrlFor(meRow?.avatar_image_id),
+        body: url,
+        type: "image",
+        created_at: createdResult.rows[0].created_at,
+        reply: null,
+      };
+      await broadcastToGroup(groupId, "group-message", payload, myId);
+      res.json({ ok: true, message: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
 // ---- Global chat --------------------------------------------------------------
 // One shared room everyone can post to and read. No block/mute filtering here
 // on purpose — those only govern DMs and DM notifications; the global room is
@@ -1002,7 +1502,7 @@ const GLOBAL_HISTORY_LIMIT = 200;
 // up storage again. (Images are the expensive part, since their bytes live
 // in the `images` table, so when a pruned message was an image we delete
 // that row too instead of leaving an orphaned blob behind.)
-const MAX_GLOBAL_MESSAGES = 200;
+const MAX_GLOBAL_MESSAGES = 500;
 
 async function pruneGlobalMessages() {
   // Find the ids of any messages beyond the newest MAX_GLOBAL_MESSAGES.
@@ -1386,6 +1886,11 @@ io.on("connection", (socket) => {
       for (const socketId of onlineSockets.get(targetId) || []) {
         io.to(socketId).emit("typing", { from: username, active: !!active });
       }
+    } else if (scope === "group") {
+      const groupId = Number(to);
+      if (!Number.isInteger(groupId)) return;
+      if (!(await isGroupMember(groupId, userId))) return;
+      await broadcastToGroup(groupId, "group-typing", { groupId, username, active: !!active }, userId);
     }
   });
 

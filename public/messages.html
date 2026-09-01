@@ -50,7 +50,7 @@
       </button>
 
       <form class="new-message" id="new-message-form">
-        <input id="new-username" placeholder="Message a username…" autocomplete="off" />
+        <input id="new-username" placeholder="Message a username… (add commas for a group)" autocomplete="off" />
         <button type="submit">Start</button>
       </form>
       <p class="new-message-error" id="new-message-error"></p>
@@ -117,6 +117,13 @@
     <button type="button" id="conv-menu-mute">Mute</button>
     <button type="button" id="conv-menu-block">Block</button>
     <button type="button" id="conv-menu-delete" class="context-menu-danger">Delete chat</button>
+  </div>
+
+  <!-- 3-dot menu for a group chat — same slot as the DM mute/block/delete menu. -->
+  <div class="context-menu is-hidden" id="group-menu">
+    <button type="button" id="group-menu-rename">Rename group</button>
+    <button type="button" id="group-menu-add">Add people</button>
+    <button type="button" id="group-menu-leave" class="context-menu-danger">Leave group</button>
   </div>
 
   <!-- Image lightbox: click any uploaded image to view it full-size. -->

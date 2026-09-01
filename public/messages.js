@@ -6,11 +6,13 @@
 // password), and receiving all of the above live over the socket.
 
 let me = null;
-let activeConversation = null; // { type: "dm", username } | { type: "global" } | null
+let activeConversation = null; // { type: "dm", username } | { type: "global" } | { type: "group", id } | null
 let conversations = []; // [{username, body, type, created_at, nameColor, avatarUrl, unread}]
 const threadCache = new Map(); // username -> messages array
 let globalMessages = null; // null until first loaded
 let globalPreview = "Say hello to everyone.";
+let groups = []; // [{id, name, members, lastMessage, unread}]
+const groupMessageCache = new Map(); // groupId -> messages array
 const mutedUsers = new Set();
 const blockedUsers = new Set();
 let replyingTo = null; // { id, sender, type, body } | null
@@ -63,6 +65,10 @@ const els = {
   menuMuteBtn: document.getElementById("conv-menu-mute"),
   menuBlockBtn: document.getElementById("conv-menu-block"),
   menuDeleteBtn: document.getElementById("conv-menu-delete"),
+  groupMenu: document.getElementById("group-menu"),
+  groupMenuRename: document.getElementById("group-menu-rename"),
+  groupMenuAdd: document.getElementById("group-menu-add"),
+  groupMenuLeave: document.getElementById("group-menu-leave"),
   replyBar: document.getElementById("reply-bar"),
   replyBarName: document.getElementById("reply-bar-name"),
   replyBarPreview: document.getElementById("reply-bar-preview"),
@@ -129,8 +135,20 @@ function isActiveDm(username) {
   );
 }
 
+function isActiveGroup(groupId) {
+  return activeConversation && activeConversation.type === "group" && String(activeConversation.id) === String(groupId);
+}
+
 function sameUsername(a, b) {
   return String(a || "").toLowerCase() === String(b || "").toLowerCase();
+}
+
+// A group's display name is whatever it was renamed to, or (by default) a
+// comma-separated list of everyone else in it.
+function groupDisplayName(group) {
+  if (group.name) return group.name;
+  const others = (group.members || []).filter((m) => !sameUsername(m.username, me.username));
+  return others.length ? others.map((m) => m.username).join(", ") : "Just you";
 }
 
 // ---- Avatars & presence --------------------------------------------------------
@@ -204,6 +222,28 @@ async function loadConversations() {
   renderConversationList();
 }
 
+async function loadGroups() {
+  const data = await apiGet("/api/groups");
+  groups = data.groups || [];
+  renderConversationList();
+}
+
+// Merges a group summary (id/name/members) the server sent back into the
+// local list — creating the entry if this is the first we've heard of it,
+// or just updating name/members if we already have it (preserving its
+// cached last message / unread count).
+function upsertGroup(partial) {
+  let g = groups.find((x) => x.id === partial.id);
+  if (!g) {
+    g = { id: partial.id, name: partial.name || null, members: partial.members || [], lastMessage: null, unread: 0 };
+    groups.push(g);
+  } else {
+    g.name = partial.name || null;
+    if (partial.members) g.members = partial.members;
+  }
+  return g;
+}
+
 // Fetches (and caches) a DM partner's avatar/color if we don't already have
 // it, then re-renders the open thread so their avatar shows up.
 async function ensurePartnerProfile(username) {
@@ -219,44 +259,89 @@ async function ensurePartnerProfile(username) {
   }
 }
 
+function renderDmItem(c) {
+  const active = isActiveDm(c.username) ? "active" : "";
+  const unread = c.unread || 0;
+  const hasUnread = unread > 0 && !isActiveDm(c.username);
+  const badge = blockedUsers.has(c.username)
+    ? `<span class="relation-badge relation-badge-blocked">Blocked</span>`
+    : mutedUsers.has(c.username)
+    ? `<span class="relation-badge">Muted</span>`
+    : "";
+  const previewText = hasUnread ? `${unread} new message${unread === 1 ? "" : "s"}` : previewFor(c.body, c.type);
+  return `
+  <div class="conversation-item ${active} ${hasUnread ? "has-unread" : ""}">
+    <button class="conv-open" data-username="${escapeHtml(c.username)}">
+      ${avatarHtml(c.username, c.avatarUrl, "", true)}
+      <div class="conv-open-text">
+        <div class="conv-name">${escapeHtml(c.username)} ${hasUnread ? `<span class="unread-dot" title="Unread"></span>` : ""} ${badge}</div>
+        <div class="conv-preview">${escapeHtml(previewText)}</div>
+      </div>
+      ${hasUnread ? `<span class="unread-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
+    </button>
+    <button type="button" class="conv-menu-btn" data-username="${escapeHtml(c.username)}" aria-label="Options for ${escapeHtml(c.username)}" aria-haspopup="true">⋮</button>
+  </div>`;
+}
+
+function renderGroupItem(g) {
+  const active = isActiveGroup(g.id) ? "active" : "";
+  const unread = g.unread || 0;
+  const hasUnread = unread > 0 && !isActiveGroup(g.id);
+  const name = groupDisplayName(g);
+  const previewText = hasUnread
+    ? `${unread} new message${unread === 1 ? "" : "s"}`
+    : g.lastMessage
+    ? g.lastMessage.type === "system"
+      ? g.lastMessage.body
+      : previewFor(g.lastMessage.body, g.lastMessage.type)
+    : "No messages yet.";
+  return `
+  <div class="conversation-item ${active} ${hasUnread ? "has-unread" : ""}">
+    <button class="conv-open" data-group-id="${g.id}">
+      <span class="group-chat-icon" aria-hidden="true">👥</span>
+      <div class="conv-open-text">
+        <div class="conv-name">${escapeHtml(name)} ${hasUnread ? `<span class="unread-dot" title="Unread"></span>` : ""}</div>
+        <div class="conv-preview">${escapeHtml(previewText)}</div>
+      </div>
+      ${hasUnread ? `<span class="unread-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
+    </button>
+    <button type="button" class="group-menu-btn conv-menu-btn" data-group-id="${g.id}" aria-label="Options for ${escapeHtml(name)}" aria-haspopup="true">⋮</button>
+  </div>`;
+}
+
+// DMs and groups are shown as one list, most recently active first — same
+// aesthetic as the normal chat system, just two kinds of rows in it.
 function renderConversationList() {
-  if (conversations.length === 0) {
+  const items = [
+    ...conversations.map((c) => ({ kind: "dm", data: c, ts: c.created_at || "" })),
+    ...groups.map((g) => ({ kind: "group", data: g, ts: (g.lastMessage && g.lastMessage.created_at) || "" })),
+  ];
+
+  if (items.length === 0) {
     els.convList.innerHTML = `<p class="chat-sidebar-empty">No conversations yet — start one above.</p>`;
     return;
   }
-  els.convList.innerHTML = conversations
-    .map((c) => {
-      const active = isActiveDm(c.username) ? "active" : "";
-      const unread = c.unread || 0;
-      const hasUnread = unread > 0 && !isActiveDm(c.username);
-      const badge = blockedUsers.has(c.username)
-        ? `<span class="relation-badge relation-badge-blocked">Blocked</span>`
-        : mutedUsers.has(c.username)
-        ? `<span class="relation-badge">Muted</span>`
-        : "";
-      const previewText = hasUnread ? `${unread} new message${unread === 1 ? "" : "s"}` : previewFor(c.body, c.type);
-      return `
-      <div class="conversation-item ${active} ${hasUnread ? "has-unread" : ""}">
-        <button class="conv-open" data-username="${escapeHtml(c.username)}">
-          ${avatarHtml(c.username, c.avatarUrl, "", true)}
-          <div class="conv-open-text">
-            <div class="conv-name">${escapeHtml(c.username)} ${hasUnread ? `<span class="unread-dot" title="Unread"></span>` : ""} ${badge}</div>
-            <div class="conv-preview">${escapeHtml(previewText)}</div>
-          </div>
-          ${hasUnread ? `<span class="unread-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
-        </button>
-        <button type="button" class="conv-menu-btn" data-username="${escapeHtml(c.username)}" aria-label="Options for ${escapeHtml(c.username)}" aria-haspopup="true">⋮</button>
-      </div>`;
-    })
-    .join("");
 
-  els.convList.querySelectorAll(".conv-open").forEach((btn) => {
+  items.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+
+  els.convList.innerHTML = items.map((item) => (item.kind === "dm" ? renderDmItem(item.data) : renderGroupItem(item.data))).join("");
+
+  els.convList.querySelectorAll(".conv-open[data-username]").forEach((btn) => {
     btn.addEventListener("click", () => openThread(btn.dataset.username));
   });
-  els.convList.querySelectorAll(".conv-menu-btn").forEach((btn) => {
+  els.convList.querySelectorAll(".conv-menu-btn[data-username]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       openContextMenu(btn.dataset.username, btn);
+    });
+  });
+  els.convList.querySelectorAll(".conv-open[data-group-id]").forEach((btn) => {
+    btn.addEventListener("click", () => openGroupThread(Number(btn.dataset.groupId)));
+  });
+  els.convList.querySelectorAll(".group-menu-btn[data-group-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openGroupMenu(Number(btn.dataset.groupId), btn);
     });
   });
 }
@@ -365,6 +450,88 @@ document.addEventListener("click", (e) => {
   closeContextMenu();
 });
 
+// ---- Group chat 3-dot menu: rename / add people / leave ----------------------
+// Same slot in the UI as the DM's mute/block/delete menu — just a different
+// menu, since group chats don't get muted/blocked/hidden the same way.
+function openGroupMenu(groupId, anchorEl) {
+  els.groupMenu.dataset.target = groupId;
+  const rect = anchorEl.getBoundingClientRect();
+  els.groupMenu.style.top = rect.bottom + 4 + "px";
+  els.groupMenu.style.left = Math.max(8, rect.right - 160) + "px";
+  els.groupMenu.classList.remove("is-hidden");
+}
+
+function closeGroupMenu() {
+  els.groupMenu.classList.add("is-hidden");
+  delete els.groupMenu.dataset.target;
+}
+
+els.groupMenuRename?.addEventListener("click", async () => {
+  const groupId = Number(els.groupMenu.dataset.target);
+  closeGroupMenu();
+  if (!groupId) return;
+  const group = groups.find((g) => g.id === groupId);
+  const name = window.prompt("Group name:", group?.name || "");
+  if (name === null) return;
+  try {
+    const res = await apiPatch(`/api/groups/${groupId}`, { name: name.trim() });
+    if (group) group.name = res.name;
+    renderConversationList();
+    if (isActiveGroup(groupId)) updateGroupThreadTitle(groupId);
+  } catch (err) {
+    window.alert(err.message);
+  }
+});
+
+els.groupMenuAdd?.addEventListener("click", async () => {
+  const groupId = Number(els.groupMenu.dataset.target);
+  closeGroupMenu();
+  if (!groupId) return;
+  const raw = window.prompt("Add people (comma-separated usernames):", "");
+  if (!raw) return;
+  const usernames = raw
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+  if (!usernames.length) return;
+  try {
+    const res = await apiPost(`/api/groups/${groupId}/members`, { usernames });
+    upsertGroup(res.group);
+    renderConversationList();
+    if (isActiveGroup(groupId)) updateGroupThreadTitle(groupId);
+  } catch (err) {
+    window.alert(err.message);
+  }
+});
+
+els.groupMenuLeave?.addEventListener("click", async () => {
+  const groupId = Number(els.groupMenu.dataset.target);
+  closeGroupMenu();
+  if (!groupId) return;
+  const group = groups.find((g) => g.id === groupId);
+  const label = group ? groupDisplayName(group) : "this group";
+  if (!window.confirm(`Leave ${label}? You'll need to be added back in to rejoin.`)) return;
+  try {
+    await apiPost(`/api/groups/${groupId}/leave`, {});
+    groups = groups.filter((g) => g.id !== groupId);
+    groupMessageCache.delete(groupId);
+    renderConversationList();
+    if (isActiveGroup(groupId)) {
+      activeConversation = null;
+      els.threadView.classList.add("is-hidden");
+      els.emptyState.classList.remove("is-hidden");
+    }
+  } catch (err) {
+    window.alert(err.message);
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (els.groupMenu.classList.contains("is-hidden")) return;
+  if (els.groupMenu.contains(e.target)) return;
+  closeGroupMenu();
+});
+
 // ---- Opening a DM thread ------------------------------------------------------
 function youtubeIdFromClient(v){try{const u=new URL(v);if(u.hostname==="youtu.be")return u.pathname.slice(1).split("/")[0];if(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com"].includes(u.hostname)){if(u.pathname==="/watch")return u.searchParams.get("v");const m=u.pathname.match(/^\/(shorts|embed)\/([^/?]+)/);return m?.[2]||null}}catch{}return null}
 function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return null;const u=m[0].replace(/[),.!?]+$/g,"");return youtubeIdFromClient(u)?u:null}
@@ -449,6 +616,50 @@ async function openGlobal() {
 
 els.globalBtn.addEventListener("click", openGlobal);
 
+// ---- Opening a group thread ----------------------------------------------------
+async function openGroupThread(groupId) {
+  activeConversation = { type: "group", id: groupId };
+  els.emptyState.classList.add("is-hidden");
+  els.threadView.classList.remove("is-hidden");
+  els.sidebar.classList.add("hide-on-mobile");
+  els.main.classList.remove("hide-on-mobile");
+  els.composerError.textContent = "";
+  cancelReply();
+  closeEmojiPanel();
+  els.globalBtn.classList.remove("active");
+  updateGroupThreadTitle(groupId);
+  renderConversationList();
+  renderTypingIndicator();
+  renderOnlineBadges();
+  els.onlinePopover.classList.add("is-hidden");
+
+  if (!groupMessageCache.has(groupId)) {
+    const data = await apiGet(`/api/groups/${groupId}/messages`);
+    groupMessageCache.set(groupId, data.messages || []);
+  }
+  renderThread();
+  els.composerInput.focus();
+  markGroupRead(groupId);
+}
+
+function updateGroupThreadTitle(groupId) {
+  const group = groups.find((g) => g.id === groupId);
+  els.threadTitle.textContent = "👥 " + (group ? groupDisplayName(group) : "Group chat");
+}
+
+async function markGroupRead(groupId) {
+  const g = groups.find((x) => x.id === groupId);
+  if (g && g.unread) {
+    g.unread = 0;
+    renderConversationList();
+  }
+  try {
+    await apiPost(`/api/groups/${groupId}/read`, {});
+  } catch {
+    // Non-critical — worst case the unread count just doesn't clear this round.
+  }
+}
+
 // ---- Rendering ------------------------------------------------------------------
 function replySnippetText(reply) {
   if (!reply) return "";
@@ -465,27 +676,34 @@ function renderReplyQuote(reply) {
   return `<button type="button" class="reply-quote" data-jump-to="${reply.id}"><span class="reply-quote-name">${escapeHtml(label)}</span>${escapeHtml(replySnippetText(reply))}</button>`;
 }
 
-function renderBubble(m, isGlobal) {
+function renderBubble(m, kind) {
+  // System messages ("X added Y", "X renamed the group") are plain centered
+  // text — no bubble, no avatar, no actions.
+  if (m.type === "system") {
+    return `<div class="bubble-system">${escapeHtml(m.body)}</div>`;
+  }
+
+  const isMulti = kind === "global" || kind === "group"; // show sender name + avatar on every bubble, like Global Chat
   const side = m.mine ? "mine" : "theirs";
   let avatarUrl = null;
   if (!m.mine) {
-    if (isGlobal) {
+    if (isMulti) {
       avatarUrl = m.avatarUrl;
     } else {
       avatarUrl = (partnerProfiles.get(activeConversation.username.toLowerCase()) || {}).avatarUrl;
     }
   }
-  const avatarOwner = isGlobal ? m.sender : activeConversation.username;
+  const avatarOwner = isMulti ? m.sender : activeConversation.username;
   const avatar = !m.mine ? avatarHtml(avatarOwner, avatarUrl, "avatar-sm", true) : "";
-  const nameStyle = isGlobal && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
+  const nameStyle = isMulti && m.nameColor ? ` style="color:${escapeHtml(m.nameColor)}"` : "";
   const senderLabel =
-    isGlobal && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
-  const seen = !isGlobal && m.mine ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>` : "";
+    isMulti && !m.mine ? `<div class="bubble-sender-row">${avatar}<div class="bubble-sender"${nameStyle}>${escapeHtml(m.sender)}</div></div>` : "";
+  const seen = kind === "dm" && m.mine ? `<div class="seen-indicator">${m.read ? "Seen" : "Sent"}</div>` : "";
   const editedTag = m.edited ? `<span class="edited-tag">(edited)</span>` : "";
   const replyQuote = renderReplyQuote(m.reply);
 
   const canManage = m.mine;
-  const canAdminManageGlobal = isGlobal && Boolean(me?.isAdmin);
+  const canAdminManageGlobal = kind === "global" && Boolean(me?.isAdmin);
   const actions = `<div class="bubble-actions">
       <button type="button" class="bubble-action-btn" data-action="reply" title="Reply">↩</button>
       ${(canManage || canAdminManageGlobal) && m.type === "text" ? `<button type="button" class="bubble-action-btn" data-action="edit" title="Edit">✎</button>` : ""}
@@ -508,9 +726,16 @@ function renderBubble(m, isGlobal) {
 }
 
 function renderThread() {
-  const isGlobal = activeConversation && activeConversation.type === "global";
-  const messages = isGlobal ? globalMessages || [] : activeConversation ? threadCache.get(activeConversation.username) || [] : [];
-  els.thread.innerHTML = messages.map((m) => renderBubble(m, isGlobal)).join("");
+  const kind = activeConversation ? activeConversation.type : null; // "dm" | "global" | "group" | null
+  const messages =
+    kind === "global"
+      ? globalMessages || []
+      : kind === "group"
+      ? groupMessageCache.get(activeConversation.id) || []
+      : activeConversation
+      ? threadCache.get(activeConversation.username) || []
+      : [];
+  els.thread.innerHTML = messages.map((m) => renderBubble(m, kind)).join("");
   els.thread.scrollTop = els.thread.scrollHeight;
 }
 
@@ -547,6 +772,62 @@ function appendGlobalMessage(sender, body, mine, type = "text", extra = {}) {
   globalPreview = previewFor(body, type);
   els.globalPreview.textContent = mine ? `You: ${globalPreview}` : `${sender}: ${globalPreview}`;
   if (activeConversation && activeConversation.type === "global") renderThread();
+}
+
+function bumpGroupPreview(groupId, body, type, extra = {}) {
+  const g = groups.find((x) => x.id === groupId);
+  if (!g) return;
+  g.lastMessage = { body, type, created_at: new Date().toISOString() };
+  if (extra.incrementUnread) g.unread = (g.unread || 0) + 1;
+  renderConversationList();
+}
+
+function appendGroupMessage(groupId, sender, body, mine, type = "text", extra = {}) {
+  const list = groupMessageCache.get(groupId) || [];
+  list.push({
+    id: extra.id ?? null,
+    sender,
+    nameColor: extra.nameColor || null,
+    avatarUrl: extra.avatarUrl || null,
+    body,
+    mine,
+    type,
+    created_at: new Date().toISOString(),
+    edited: false,
+    reply: extra.reply || null,
+  });
+  groupMessageCache.set(groupId, list);
+  const activeNow = isActiveGroup(groupId) && document.hasFocus();
+  bumpGroupPreview(groupId, body, type, { incrementUnread: type !== "system" && !mine && !activeNow });
+  if (isActiveGroup(groupId)) renderThread();
+}
+
+function replaceGroupMessageBody(groupId, oldBody, newBody, id) {
+  const list = groupMessageCache.get(groupId) || [];
+  const msg = [...list].reverse().find((m) => m.body === oldBody && m.mine);
+  if (msg) {
+    msg.body = newBody;
+    if (id != null) msg.id = id;
+    if (isActiveGroup(groupId)) renderThread();
+  }
+}
+
+function findGroupMessageById(groupId, id) {
+  const list = groupMessageCache.get(groupId) || [];
+  return list.find((m) => String(m.id) === String(id));
+}
+
+// Removes a message from whichever group's cache holds it, by id — used
+// both for our own unsends and for "group-message-deleted" events.
+function removeGroupMessageEverywhere(id) {
+  for (const [, list] of groupMessageCache) {
+    const idx = list.findIndex((m) => String(m.id) === String(id));
+    if (idx !== -1) {
+      list.splice(idx, 1);
+      return true;
+    }
+  }
+  return false;
 }
 
 // Swaps a locally-previewed image (a blob: URL shown while uploading) for the
@@ -591,13 +872,10 @@ function cancelReply() {
 els.replyBarCancel.addEventListener("click", cancelReply);
 
 function findMessageById(id) {
-  const isGlobal = activeConversation && activeConversation.type === "global";
-  const list = isGlobal
-    ? globalMessages || []
-    : activeConversation
-    ? threadCache.get(activeConversation.username) || []
-    : [];
-  return list.find((m) => String(m.id) === String(id));
+  if (!activeConversation) return null;
+  if (activeConversation.type === "global") return (globalMessages || []).find((m) => String(m.id) === String(id));
+  if (activeConversation.type === "group") return findGroupMessageById(activeConversation.id, id);
+  return (threadCache.get(activeConversation.username) || []).find((m) => String(m.id) === String(id));
 }
 
 // Removes a message from whichever local list holds it, by id. Used both
@@ -625,12 +903,15 @@ function removeGlobalMessage(id) {
 }
 
 async function deleteMessage(id) {
-  const isGlobal = activeConversation && activeConversation.type === "global";
+  const kind = activeConversation && activeConversation.type;
   if (!window.confirm("Unsend this message? It will be removed for everyone.")) return;
   try {
-    if (isGlobal) {
+    if (kind === "global") {
       await apiDelete(`/api/global/messages/${id}`);
       removeGlobalMessage(id);
+    } else if (kind === "group") {
+      await apiDelete(`/api/groups/${activeConversation.id}/messages/${id}`);
+      removeGroupMessageEverywhere(id);
     } else {
       await apiDelete(`/api/messages/${id}`);
       removeMessageEverywhere(id);
@@ -661,12 +942,14 @@ function startEdit(id) {
 }
 
 async function saveEdit(id, newBody) {
-  const isGlobal = activeConversation && activeConversation.type === "global";
+  const kind = activeConversation && activeConversation.type;
   const trimmed = newBody.trim();
   if (!trimmed) return;
   try {
-    if (isGlobal) {
+    if (kind === "global") {
       await apiPatch(`/api/global/messages/${id}`, { body: trimmed });
+    } else if (kind === "group") {
+      await apiPatch(`/api/groups/${activeConversation.id}/messages/${id}`, { body: trimmed });
     } else {
       await apiPatch(`/api/messages/${id}`, { body: trimmed });
     }
@@ -706,10 +989,10 @@ els.thread.addEventListener("click", (e) => {
     if (!msg) return;
     const action = actionBtn.dataset.action;
     if (action === "reply") {
-      const isGlobal = activeConversation && activeConversation.type === "global";
+      const isMulti = activeConversation && (activeConversation.type === "global" || activeConversation.type === "group");
       setReplyBar({
         id: msg.id,
-        sender: msg.mine ? "me" : isGlobal ? msg.sender : activeConversation.username,
+        sender: msg.mine ? "me" : isMulti ? msg.sender : activeConversation.username,
         type: msg.type,
         body: msg.body,
       });
@@ -754,27 +1037,54 @@ els.lightbox.addEventListener("click", (e) => {
 });
 
 // ---- New message ("type a username, it opens/sends to them") --------------
+// Separating usernames with commas starts a group chat with all of them
+// instead of a single DM.
 els.newForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   els.newError.textContent = "";
-  const username = els.newInput.value.trim();
-  if (!username) return;
-  if (sameUsername(username, me.username)) {
-    els.newError.textContent = "You can't message yourself.";
+  const raw = els.newInput.value.trim();
+  if (!raw) return;
+
+  const parts = raw
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+
+  if (parts.length <= 1) {
+    const username = parts[0] || raw;
+    if (sameUsername(username, me.username)) {
+      els.newError.textContent = "You can't message yourself.";
+      return;
+    }
+    let canonicalUsername = username;
+    try {
+      const check = await apiGet(`/api/users/${encodeURIComponent(username)}`);
+      if (check.error) throw new Error(check.error);
+      canonicalUsername = check.username;
+    } catch {
+      els.newError.textContent = "No user with that username.";
+      return;
+    }
+    els.newInput.value = "";
+    if (!threadCache.has(canonicalUsername)) threadCache.set(canonicalUsername, []);
+    openThread(canonicalUsername);
     return;
   }
-  let canonicalUsername = username;
+
+  const usernames = [...new Set(parts)].filter((u) => !sameUsername(u, me.username));
+  if (usernames.length < 2) {
+    els.newError.textContent = "Add at least two other people to start a group.";
+    return;
+  }
   try {
-    const check = await apiGet(`/api/users/${encodeURIComponent(username)}`);
-    if (check.error) throw new Error(check.error);
-    canonicalUsername = check.username;
-  } catch {
-    els.newError.textContent = "No user with that username.";
-    return;
+    const res = await apiPost("/api/groups", { usernames });
+    els.newInput.value = "";
+    upsertGroup(res.group);
+    renderConversationList();
+    openGroupThread(res.group.id);
+  } catch (err) {
+    els.newError.textContent = err.message;
   }
-  els.newInput.value = "";
-  if (!threadCache.has(canonicalUsername)) threadCache.set(canonicalUsername, []);
-  openThread(canonicalUsername);
 });
 
 // ---- Sending a text message in the open thread ------------------------------
@@ -799,6 +1109,20 @@ els.composer.addEventListener("submit", async (e) => {
       replaceGlobalMessageBody(detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body, res.message.body, res.message.id);
       const local=globalMessages?.find(m=>String(m.id)===String(res.message.id)); if(local) local.type=res.message.type;
     } catch (err) { appendGlobalMessage(me.username, `Failed to send: ${err.message}`, false, "text"); }
+    return;
+  }
+
+  if (activeConversation.type === "group") {
+    const groupId = activeConversation.id;
+    const sendBody = detectedType === "gif" ? gif : detectedType === "youtube" ? yt : body;
+    appendGroupMessage(groupId, me.username, sendBody, true, detectedType, {
+      nameColor: me.nameColor, avatarUrl: me.avatarUrl, reply: replyPayload,
+    });
+    try {
+      const res = await apiPost(`/api/groups/${groupId}/messages`, { body: sendBody, type: detectedType, replyTo: reply ? reply.id : undefined });
+      replaceGroupMessageBody(groupId, sendBody, res.message.body, res.message.id);
+      const local = groupMessageCache.get(groupId)?.find((m) => String(m.id) === String(res.message.id)); if (local) local.type = res.message.type;
+    } catch (err) { appendGroupMessage(groupId, me.username, `Failed to send: ${err.message}`, false, "text"); }
     return;
   }
 
@@ -829,6 +1153,8 @@ function sendTypingPing(active) {
   lastTypingPingAt = active ? now : 0;
   if (activeConversation.type === "global") {
     socketRef.emit("typing", { scope: "global", active });
+  } else if (activeConversation.type === "group") {
+    socketRef.emit("typing", { scope: "group", to: activeConversation.id, active });
   } else {
     socketRef.emit("typing", { scope: "dm", to: activeConversation.username, active });
   }
@@ -838,18 +1164,23 @@ els.composerInput.addEventListener("input", () => {
   sendTypingPing(els.composerInput.value.trim().length > 0);
 });
 
-function typingKeyFor(scope, from) {
-  return scope === "global" ? "global" : `dm:${from.toLowerCase()}`;
+function typingKeyFor(scope, from, channel) {
+  if (scope === "global") return "global";
+  if (scope === "group") return `group:${channel}`;
+  return `dm:${from.toLowerCase()}`;
 }
 
-function noteTyping(scope, from, active) {
+function noteTyping(scope, from, active, channel) {
   // Only worth showing if we're actually looking at that conversation.
   const isGlobal = scope === "global";
+  const isGroup = scope === "group";
   const relevant = isGlobal
     ? activeConversation && activeConversation.type === "global"
+    : isGroup
+    ? isActiveGroup(channel)
     : isActiveDm(from);
 
-  const key = typingKeyFor(scope, from);
+  const key = typingKeyFor(scope, from, channel);
   if (!typingUsers.has(key)) typingUsers.set(key, new Map());
   const bucket = typingUsers.get(key);
 
@@ -871,8 +1202,15 @@ function noteTyping(scope, from, active) {
 
 function renderTypingIndicator() {
   if (!els.typingIndicator) return;
-  const isGlobal = activeConversation && activeConversation.type === "global";
-  const key = isGlobal ? "global" : activeConversation ? typingKeyFor("dm", activeConversation.username) : null;
+  const kind = activeConversation ? activeConversation.type : null;
+  const key =
+    kind === "global"
+      ? "global"
+      : kind === "group"
+      ? typingKeyFor("group", null, activeConversation.id)
+      : activeConversation
+      ? typingKeyFor("dm", activeConversation.username)
+      : null;
   const bucket = key ? typingUsers.get(key) : null;
   const names = bucket ? [...bucket.keys()] : [];
 
@@ -896,6 +1234,13 @@ async function sendSelectedGif(url){
     appendGlobalMessage(me.username,url,true,"gif",{nameColor:me.nameColor,avatarUrl:me.avatarUrl});
     const r=await apiPost("/api/global/messages",{body:url,type:"gif"});
     const local=globalMessages?.find(m=>String(m.id)===String(r.message.id)); if(local){local.body=r.message.body;local.type="gif";renderGlobalMessages?.();}
+    return;
+  }
+  if(activeConversation.type==="group"){
+    const groupId=activeConversation.id;
+    appendGroupMessage(groupId,me.username,url,true,"gif",{nameColor:me.nameColor,avatarUrl:me.avatarUrl});
+    const r=await apiPost(`/api/groups/${groupId}/messages`,{body:url,type:"gif"});
+    replaceGroupMessageBody(groupId,url,r.message.body,r.message.id);
     return;
   }
   const to=activeConversation.username;
@@ -993,9 +1338,11 @@ async function sendImage(file) {
 
   const previewUrl = URL.createObjectURL(file);
   const isGlobal = activeConversation.type === "global";
-  const to = isGlobal ? null : activeConversation.username;
+  const isGroup = activeConversation.type === "group";
+  const to = isGlobal || isGroup ? null : activeConversation.username;
 
   if (isGlobal) appendGlobalMessage(me.username, previewUrl, true, "image", { nameColor: me.nameColor, avatarUrl: me.avatarUrl });
+  else if (isGroup) appendGroupMessage(activeConversation.id, me.username, previewUrl, true, "image", { nameColor: me.nameColor, avatarUrl: me.avatarUrl });
   else {
     appendMessage(to, previewUrl, true, "image");
     bumpConversationPreview(to, previewUrl, "image");
@@ -1006,7 +1353,12 @@ async function sendImage(file) {
   formData.append("image", file);
 
   try {
-    const res = await fetch(isGlobal ? "/api/global/messages/image" : "/api/messages/image", {
+    const uploadUrl = isGlobal
+      ? "/api/global/messages/image"
+      : isGroup
+      ? `/api/groups/${activeConversation.id}/messages/image`
+      : "/api/messages/image";
+    const res = await fetch(uploadUrl, {
       method: "POST",
       credentials: "same-origin",
       body: formData,
@@ -1015,6 +1367,8 @@ async function sendImage(file) {
     if (!res.ok) throw new Error(data.error || "Upload failed.");
     if (isGlobal) {
       replaceGlobalMessageBody(previewUrl, data.message.body, data.message.id);
+    } else if (isGroup) {
+      replaceGroupMessageBody(activeConversation.id, previewUrl, data.message.body, data.message.id);
     } else {
       replaceMessageBody(to, previewUrl, data.message.body, data.message.id);
       bumpConversationPreview(to, data.message.body, "image");
@@ -1364,6 +1718,23 @@ function notifyNewMessage(from, body, type) {
   };
 }
 
+function notifyNewGroupMessage(groupId, from, body, type) {
+  if (!("Notification" in window)) return;
+  if (Notification.permission !== "granted") return;
+  if (isActiveGroup(groupId) && document.hasFocus()) return;
+
+  const group = groups.find((g) => g.id === groupId);
+  const groupName = group ? groupDisplayName(group) : "a group";
+  const n = new Notification(`${from} in ${groupName}`, {
+    body: type === "image" ? "📷 Sent a photo" : body,
+    tag: `group-${groupId}`,
+  });
+  n.onclick = () => {
+    window.focus();
+    openGroupThread(groupId);
+  };
+}
+
 // ---- Presence: tell the server whether this tab is actually being looked at --
 function isTabActive() {
   return document.hasFocus() && document.visibilityState === "visible";
@@ -1395,6 +1766,7 @@ document.addEventListener("visibilitychange", reportFocusState);
   (relations.blocked || []).forEach((u) => blockedUsers.add(u));
 
   await loadConversations();
+  await loadGroups();
 
   try {
     const presence = await apiGet("/api/presence");
@@ -1483,8 +1855,50 @@ document.addEventListener("visibilitychange", reportFocusState);
     if (isActiveDm(by)) renderThread();
   });
 
+  socket.on("group-message", ({ groupId, id, sender, nameColor, avatarUrl, body, type, reply }) => {
+    const active = isActiveGroup(groupId) && document.hasFocus();
+    appendGroupMessage(groupId, sender, body, false, type || "text", { id, nameColor, avatarUrl, reply });
+    if (type !== "system") {
+      notifyNewGroupMessage(groupId, sender, body, type || "text");
+      noteTyping("group", sender, false, groupId);
+    }
+    if (active) markGroupRead(groupId);
+  });
+
+  socket.on("group-message-edited", ({ groupId, id, body }) => {
+    const list = groupMessageCache.get(groupId);
+    const msg = list && list.find((m) => String(m.id) === String(id));
+    if (msg) {
+      msg.body = body;
+      msg.edited = true;
+      if (isActiveGroup(groupId)) renderThread();
+    }
+  });
+
+  socket.on("group-message-deleted", ({ groupId, id }) => {
+    if (removeGroupMessageEverywhere(id) && isActiveGroup(groupId)) renderThread();
+  });
+
+  // Fired on group creation, rename, and adding members — same shape each
+  // time, so one handler upserts the group whether we already had it or not.
+  socket.on("group-updated", (payload) => {
+    upsertGroup(payload);
+    renderConversationList();
+    if (isActiveGroup(payload.id)) updateGroupThreadTitle(payload.id);
+  });
+
+  socket.on("group-member-left", ({ id, members }) => {
+    const g = groups.find((x) => x.id === id);
+    if (g) {
+      g.members = members;
+      renderConversationList();
+      if (isActiveGroup(id)) updateGroupThreadTitle(id);
+    }
+  });
+
   socket.on("typing", ({ from, active }) => noteTyping("dm", from, active));
   socket.on("global-typing", ({ username, active }) => noteTyping("global", username, active));
+  socket.on("group-typing", ({ groupId, username, active }) => noteTyping("group", username, active, groupId));
 
   socket.on("presence", ({ username, active }) => {
     const key = username.toLowerCase();
@@ -1512,6 +1926,8 @@ document.addEventListener("visibilitychange", reportFocusState);
   window.addEventListener("focus", () => {
     if (activeConversation && activeConversation.type === "dm") {
       markRead(activeConversation.username);
+    } else if (activeConversation && activeConversation.type === "group") {
+      markGroupRead(activeConversation.id);
     }
   });
 })();
