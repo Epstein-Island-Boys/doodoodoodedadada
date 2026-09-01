@@ -2218,10 +2218,43 @@ app.get("/api/media/:id", async (req, res) => {
   const row = result.rows[0];
   if (!row) return res.status(404).end();
 
+  const buffer = Buffer.from(row.data);
+  const total = buffer.length;
+
   res.set("Content-Type", row.mime_type);
   res.set("Accept-Ranges", "bytes");
   res.set("Cache-Control", "private, max-age=31536000, immutable");
-  res.send(Buffer.from(row.data));
+
+  // <audio>/<video> elements probe with a Range request before they'll play
+  // anything — Safari and iOS in particular refuse to play at all if the
+  // server advertises "Accept-Ranges: bytes" (above) but then ignores the
+  // Range header and always sends the whole file back with a plain 200.
+  // So a real 206 Partial Content response is required here, not optional.
+  const range = req.headers.range;
+  if (!range) {
+    res.status(200);
+    res.set("Content-Length", total);
+    return res.send(buffer);
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!match) {
+    res.status(416).set("Content-Range", `bytes */${total}`).end();
+    return;
+  }
+
+  let start = match[1] ? parseInt(match[1], 10) : 0;
+  let end = match[2] ? parseInt(match[2], 10) : total - 1;
+  if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= total) {
+    res.status(416).set("Content-Range", `bytes */${total}`).end();
+    return;
+  }
+  end = Math.min(end, total - 1);
+
+  res.status(206);
+  res.set("Content-Range", `bytes ${start}-${end}/${total}`);
+  res.set("Content-Length", end - start + 1);
+  res.send(buffer.subarray(start, end + 1));
 });
 
 // ---- Serve an image back out of Turso ----------------------------------------
