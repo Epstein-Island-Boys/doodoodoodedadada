@@ -100,11 +100,15 @@
             <button type="button" class="tool-btn" id="image-btn" aria-label="Send an image">📷</button><button type="button" class="tool-btn" id="gif-btn" aria-label="Search GIFs">GIF</button>
             <button type="button" class="tool-btn" id="plus-btn" aria-label="More options" aria-haspopup="true">+</button>
             <input type="file" id="image-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+            <input type="file" id="audio-file-input" accept="audio/mpeg,audio/mp3,audio/ogg,audio/wav,audio/wave,audio/x-wav,audio/webm,audio/mp4" hidden />
+            <input type="file" id="video-file-input" accept="video/mp4,video/webm" hidden />
           </div>
           <div class="plus-menu is-hidden" id="plus-menu">
             <button type="button" id="plus-voice">🎤 Record a voice message</button>
             <button type="button" id="plus-photo">📸 Take a photo</button>
             <button type="button" id="plus-video">🎥 Record a video</button>
+            <button type="button" id="plus-audio-file">🎵 Attach an audio file</button>
+            <button type="button" id="plus-video-file">🎬 Attach a video file</button>
           </div>
           <input id="composer-input" placeholder="Write a message…" autocomplete="off" maxlength="2000" />
           <button type="submit">Send</button>

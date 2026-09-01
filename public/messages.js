@@ -272,6 +272,10 @@ const els = {
   plusVoice: document.getElementById("plus-voice"),
   plusPhoto: document.getElementById("plus-photo"),
   plusVideo: document.getElementById("plus-video"),
+  plusAudioFile: document.getElementById("plus-audio-file"),
+  plusVideoFile: document.getElementById("plus-video-file"),
+  audioFileInput: document.getElementById("audio-file-input"),
+  videoFileInput: document.getElementById("video-file-input"),
 
   cameraOverlay: document.getElementById("camera-overlay"),
   cameraModalTitle: document.getElementById("camera-modal-title"),
@@ -1662,6 +1666,31 @@ const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const ALLOWED_VIDEO_TYPES = new Set(["video/webm", "video/mp4"]);
 const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
 
+// A blob's `type` alone isn't enough — when the file gets downloaded again
+// later (or re-uploaded elsewhere) it needs a real extension, or nothing on
+// the other end knows what it is. This is also what fixes files coming back
+// out "in a weird format": they were never missing data, just a filename.
+const EXTENSION_BY_MIME = {
+  "audio/webm": "webm",
+  "audio/ogg": "ogg",
+  "audio/mp4": "m4a",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "video/webm": "webm",
+  "video/mp4": "mp4",
+};
+
+function filenameForBlob(blob, kind) {
+  // A picked File already has a real filename (with extension) from the
+  // user's device — keep it. Only synthesize one for recorder Blobs, which
+  // have no name at all.
+  if (blob.name) return blob.name;
+  const base = baseMimeType(blob.type);
+  const ext = EXTENSION_BY_MIME[base] || "webm";
+  const stem = kind === "audio" ? "voice-message" : "video-message";
+  return `${stem}.${ext}`;
+}
+
 async function sendRecordedMedia(blob, kind) {
   els.composerError.textContent = "";
   if (!activeConversation) {
@@ -1694,7 +1723,7 @@ async function sendRecordedMedia(blob, kind) {
 
   const formData = new FormData();
   if (to) formData.append("to", to);
-  formData.append(kind, blob, kind === "audio" ? "voice-message" : "video-message");
+  formData.append(kind, blob, filenameForBlob(blob, kind));
 
   try {
     const uploadUrl = isGlobal
@@ -2114,6 +2143,38 @@ els.voiceOverlay.addEventListener("click", (e) => {
 els.plusVoice.addEventListener("click", openVoice);
 els.plusPhoto.addEventListener("click", () => openCamera("photo"));
 els.plusVideo.addEventListener("click", () => openCamera("video"));
+
+// ---- "+" menu: attach an existing audio/video file (mp3, ogg, wav, mp4…) ----
+// Unlike the mic/camera recorder above, these are files the user already
+// has, so there's no MediaRecorder/codec step — just an upload through the
+// same audio/video endpoints, reusing sendRecordedMedia (it works on any
+// Blob, and a File is a Blob with a real filename already attached).
+els.plusAudioFile.addEventListener("click", () => {
+  closePlusMenu();
+  if (!activeConversation) {
+    els.composerError.textContent = "Open a conversation first.";
+    return;
+  }
+  els.audioFileInput.click();
+});
+els.plusVideoFile.addEventListener("click", () => {
+  closePlusMenu();
+  if (!activeConversation) {
+    els.composerError.textContent = "Open a conversation first.";
+    return;
+  }
+  els.videoFileInput.click();
+});
+els.audioFileInput.addEventListener("change", () => {
+  const file = els.audioFileInput.files[0];
+  els.audioFileInput.value = "";
+  if (file) sendRecordedMedia(file, "audio");
+});
+els.videoFileInput.addEventListener("change", () => {
+  const file = els.videoFileInput.files[0];
+  els.videoFileInput.value = "";
+  if (file) sendRecordedMedia(file, "video");
+});
 
 els.backLink.addEventListener("click", () => {
   els.sidebar.classList.remove("hide-on-mobile");

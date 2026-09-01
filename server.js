@@ -2203,6 +2203,25 @@ app.post("/api/global/messages/video", requireAuth, (req, res) => {
   });
 });
 
+// Mirrors the client-side EXTENSION_BY_MIME map in messages.js. Used so a
+// saved/downloaded clip has a real extension — without one, the OS and other
+// apps have no way to tell what the file is, even though the bytes and the
+// Content-Type served alongside them are perfectly fine.
+const EXTENSION_BY_MIME = {
+  "audio/webm": "webm",
+  "audio/ogg": "ogg",
+  "audio/mp4": "m4a",
+  "audio/mpeg": "mp3",
+  "audio/wav": "wav",
+  "video/webm": "webm",
+  "video/mp4": "mp4",
+};
+
+function filenameForMime(mimeType, id) {
+  const ext = EXTENSION_BY_MIME[baseMimeType(mimeType)] || "bin";
+  return `media-${id}.${ext}`;
+}
+
 // ---- Serve a voice/video clip back out of Turso -------------------------------
 // Same shape and reasoning as the image route below — no auth gate, since an
 // <audio>/<video> tag's src request can't carry the app's session-aware
@@ -2224,6 +2243,7 @@ app.get("/api/media/:id", async (req, res) => {
   res.set("Content-Type", row.mime_type);
   res.set("Accept-Ranges", "bytes");
   res.set("Cache-Control", "private, max-age=31536000, immutable");
+  res.set("Content-Disposition", `inline; filename="${filenameForMime(row.mime_type, id)}"`);
 
   // <audio>/<video> elements probe with a Range request before they'll play
   // anything — Safari and iOS in particular refuse to play at all if the
