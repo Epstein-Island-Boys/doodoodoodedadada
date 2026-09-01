@@ -272,10 +272,6 @@ const els = {
   plusVoice: document.getElementById("plus-voice"),
   plusPhoto: document.getElementById("plus-photo"),
   plusVideo: document.getElementById("plus-video"),
-  plusAudioFile: document.getElementById("plus-audio-file"),
-  plusVideoFile: document.getElementById("plus-video-file"),
-  audioFileInput: document.getElementById("audio-file-input"),
-  videoFileInput: document.getElementById("video-file-input"),
 
   cameraOverlay: document.getElementById("camera-overlay"),
   cameraModalTitle: document.getElementById("camera-modal-title"),
@@ -1119,6 +1115,36 @@ function replaceGlobalMessageBody(oldBody, newBody, id) {
   }
 }
 
+// Drops an optimistically-added bubble (matched by its blob-preview URL)
+// when the actual upload behind it failed — used so a failed voice/video
+// send doesn't leave a permanently-broken bubble sitting in the thread.
+function removeMessageByPreview(username, previewUrl) {
+  const list = threadCache.get(username) || [];
+  const idx = [...list].reverse().findIndex((m) => m.body === previewUrl && m.mine);
+  if (idx === -1) return;
+  const realIdx = list.length - 1 - idx;
+  list.splice(realIdx, 1);
+  if (isActiveDm(username)) renderThread();
+}
+
+function removeGroupMessageByPreview(groupId, previewUrl) {
+  const list = groupMessageCache.get(groupId) || [];
+  const idx = [...list].reverse().findIndex((m) => m.body === previewUrl && m.mine);
+  if (idx === -1) return;
+  const realIdx = list.length - 1 - idx;
+  list.splice(realIdx, 1);
+  if (isActiveGroup(groupId)) renderThread();
+}
+
+function removeGlobalMessageByPreview(previewUrl) {
+  if (!globalMessages) return;
+  const idx = [...globalMessages].reverse().findIndex((m) => m.body === previewUrl && m.mine);
+  if (idx === -1) return;
+  const realIdx = globalMessages.length - 1 - idx;
+  globalMessages.splice(realIdx, 1);
+  if (activeConversation && activeConversation.type === "global") renderThread();
+}
+
 // ---- Reply / edit / unsend ---------------------------------------------------
 function setReplyBar(reply) {
   replyingTo = reply;
@@ -1681,10 +1707,6 @@ const EXTENSION_BY_MIME = {
 };
 
 function filenameForBlob(blob, kind) {
-  // A picked File already has a real filename (with extension) from the
-  // user's device — keep it. Only synthesize one for recorder Blobs, which
-  // have no name at all.
-  if (blob.name) return blob.name;
   const base = baseMimeType(blob.type);
   const ext = EXTENSION_BY_MIME[base] || "webm";
   const stem = kind === "audio" ? "voice-message" : "video-message";
@@ -1748,7 +1770,11 @@ async function sendRecordedMedia(blob, kind) {
     }
     return true;
   } catch (err) {
+    console.error(`${kind} upload failed:`, err);
     els.composerError.textContent = err.message;
+    if (isGlobal) removeGlobalMessageByPreview(previewUrl);
+    else if (isGroup) removeGroupMessageByPreview(activeConversation.id, previewUrl);
+    else removeMessageByPreview(to, previewUrl);
     return false;
   } finally {
     URL.revokeObjectURL(previewUrl);
@@ -1985,13 +2011,25 @@ function startVideoRecording() {
   try {
     cameraRecorder = new MediaRecorder(cameraStream, mimeType ? { mimeType } : undefined);
   } catch (err) {
+    console.error("Video MediaRecorder setup failed:", err);
     els.cameraError.textContent = "Video recording isn't supported in this browser.";
     return;
   }
   cameraRecorder.ondataavailable = (e) => {
     if (e.data && e.data.size) cameraChunks.push(e.data);
   };
+  cameraRecorder.onerror = (e) => {
+    console.error("Video MediaRecorder error:", e.error || e);
+    els.cameraError.textContent = "Recording failed — please try again.";
+  };
   cameraRecorder.onstop = () => {
+    if (!cameraChunks.length) {
+      console.error("Video recording produced no data.");
+      els.cameraError.textContent = "That recording came out empty — please try again.";
+      stopCameraStream();
+      resetCameraStage();
+      return;
+    }
     const blob = new Blob(cameraChunks, { type: cameraRecorder.mimeType || "video/webm" });
     cameraCapturedBlob = blob;
     els.cameraVideoPreview.src = URL.createObjectURL(blob);
@@ -2001,7 +2039,11 @@ function startVideoRecording() {
     els.cameraReviewControls.classList.remove("is-hidden");
     stopCameraStream();
   };
-  cameraRecorder.start();
+  // Passing a timeslice makes the recorder flush chunks periodically instead
+  // of only buffering everything until stop() — without it, some browsers
+  // (particularly on Android) can hand back an empty blob if stop() is
+  // called very soon after start().
+  cameraRecorder.start(250);
   cameraRecording = true;
   els.cameraShutter.textContent = "Stop recording";
   cameraTimer.start();
@@ -2100,32 +2142,56 @@ async function toggleVoiceRecording() {
     return;
   }
   els.voiceError.textContent = "";
+
+  let stream;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    voiceStream = stream;
-    voiceChunks = [];
-    const mimeType = pickSupportedMimeType(["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]);
-    voiceRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    voiceRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size) voiceChunks.push(e.data);
-    };
-    voiceRecorder.onstop = () => {
-      const blob = new Blob(voiceChunks, { type: voiceRecorder.mimeType || "audio/webm" });
-      voiceCapturedBlob = blob;
-      els.voicePreview.src = URL.createObjectURL(blob);
-      els.voicePreview.classList.remove("is-hidden");
-      els.voiceMicIcon.classList.add("is-hidden");
-      els.voiceControls.classList.add("is-hidden");
-      els.voiceReviewControls.classList.remove("is-hidden");
-      stopVoiceStream();
-    };
-    voiceRecorder.start();
-    voiceRecording = true;
-    els.voiceRecordBtn.textContent = "Stop recording";
-    voiceTimer.start();
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
+    console.error("getUserMedia(audio) failed:", err);
     els.voiceError.textContent = "Couldn't access your microphone — check your browser's microphone permissions.";
+    return;
   }
+  voiceStream = stream;
+  voiceChunks = [];
+  const mimeType = pickSupportedMimeType(["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"]);
+  try {
+    voiceRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  } catch (err) {
+    console.error("Audio MediaRecorder setup failed:", err);
+    els.voiceError.textContent = "Voice recording isn't supported in this browser.";
+    stopVoiceStream();
+    return;
+  }
+  voiceRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size) voiceChunks.push(e.data);
+  };
+  voiceRecorder.onerror = (e) => {
+    console.error("Audio MediaRecorder error:", e.error || e);
+    els.voiceError.textContent = "Recording failed — please try again.";
+  };
+  voiceRecorder.onstop = () => {
+    if (!voiceChunks.length) {
+      console.error("Voice recording produced no data.");
+      els.voiceError.textContent = "That recording came out empty — please try again.";
+      stopVoiceStream();
+      resetVoiceStage();
+      return;
+    }
+    const blob = new Blob(voiceChunks, { type: voiceRecorder.mimeType || "audio/webm" });
+    voiceCapturedBlob = blob;
+    els.voicePreview.src = URL.createObjectURL(blob);
+    els.voicePreview.classList.remove("is-hidden");
+    els.voiceMicIcon.classList.add("is-hidden");
+    els.voiceControls.classList.add("is-hidden");
+    els.voiceReviewControls.classList.remove("is-hidden");
+    stopVoiceStream();
+  };
+  // See the matching comment in startVideoRecording — a timeslice avoids an
+  // empty blob if the recording is stopped very soon after it starts.
+  voiceRecorder.start(250);
+  voiceRecording = true;
+  els.voiceRecordBtn.textContent = "Stop recording";
+  voiceTimer.start();
 }
 
 els.voiceRecordBtn.addEventListener("click", toggleVoiceRecording);
@@ -2143,38 +2209,6 @@ els.voiceOverlay.addEventListener("click", (e) => {
 els.plusVoice.addEventListener("click", openVoice);
 els.plusPhoto.addEventListener("click", () => openCamera("photo"));
 els.plusVideo.addEventListener("click", () => openCamera("video"));
-
-// ---- "+" menu: attach an existing audio/video file (mp3, ogg, wav, mp4…) ----
-// Unlike the mic/camera recorder above, these are files the user already
-// has, so there's no MediaRecorder/codec step — just an upload through the
-// same audio/video endpoints, reusing sendRecordedMedia (it works on any
-// Blob, and a File is a Blob with a real filename already attached).
-els.plusAudioFile.addEventListener("click", () => {
-  closePlusMenu();
-  if (!activeConversation) {
-    els.composerError.textContent = "Open a conversation first.";
-    return;
-  }
-  els.audioFileInput.click();
-});
-els.plusVideoFile.addEventListener("click", () => {
-  closePlusMenu();
-  if (!activeConversation) {
-    els.composerError.textContent = "Open a conversation first.";
-    return;
-  }
-  els.videoFileInput.click();
-});
-els.audioFileInput.addEventListener("change", () => {
-  const file = els.audioFileInput.files[0];
-  els.audioFileInput.value = "";
-  if (file) sendRecordedMedia(file, "audio");
-});
-els.videoFileInput.addEventListener("change", () => {
-  const file = els.videoFileInput.files[0];
-  els.videoFileInput.value = "";
-  if (file) sendRecordedMedia(file, "video");
-});
 
 els.backLink.addEventListener("click", () => {
   els.sidebar.classList.remove("hide-on-mobile");
