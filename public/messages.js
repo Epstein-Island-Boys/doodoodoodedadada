@@ -273,15 +273,21 @@ const els = {
   logoutBtn: document.getElementById("logout-btn"),
 
   callStartBtn: document.getElementById("call-start-btn"),
+  callVideoStartBtn: document.getElementById("call-video-start-btn"),
   callOverlay: document.getElementById("call-overlay"),
   callModal: document.getElementById("call-modal"),
   callAvatar: document.getElementById("call-avatar"),
   callAvatarInitial: document.getElementById("call-avatar-initial"),
   callAvatarImg: document.getElementById("call-avatar-img"),
+  callVideoStage: document.getElementById("call-video-stage"),
+  callRemoteVideo: document.getElementById("call-remote-video"),
+  callLocalVideo: document.getElementById("call-local-video"),
   callPeerName: document.getElementById("call-peer-name"),
   callStatus: document.getElementById("call-status"),
   callError: document.getElementById("call-error"),
   callRemoteAudio: document.getElementById("call-remote-audio"),
+  callVolumeRow: document.getElementById("call-volume-row"),
+  callVolumeSlider: document.getElementById("call-volume"),
   callControlsOutgoing: document.getElementById("call-controls-outgoing"),
   callControlsIncoming: document.getElementById("call-controls-incoming"),
   callControlsActive: document.getElementById("call-controls-active"),
@@ -290,6 +296,7 @@ const els = {
   callAcceptBtn: document.getElementById("call-accept-btn"),
   callHangupBtn: document.getElementById("call-hangup-btn"),
   callMuteBtn: document.getElementById("call-mute-btn"),
+  callCameraBtn: document.getElementById("call-camera-btn"),
   onlinePopoverTitle: document.getElementById("online-popover-title"),
 
   plusBtn: document.getElementById("plus-btn"),
@@ -2814,11 +2821,12 @@ window.addEventListener("focus", reportFocusState);
 window.addEventListener("blur", reportFocusState);
 document.addEventListener("visibilitychange", reportFocusState);
 
-// ---- Beta: DM voice calls -------------------------------------------------------
-// WebRTC audio calls, gated behind Beta Features and DMs only (see the
-// call:* socket handlers in server.js — there's no group/global equivalent).
+// ---- Voice & video calls ---------------------------------------------------------
+// Voice calls are a regular DM feature. Video calls are still Beta-gated and
+// need both sides opted in (see the call:invite handler in server.js — that's
+// the only place the beta check happens; everything below is type-agnostic).
 const RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
-let currentCall = null; // { role, peerUsername, callId, pc, localStream, iceQueue } | null
+let currentCall = null; // { role, peerUsername, callId, type, pc, localStream, iceQueue, disconnectTimer } | null
 const partnerBeta = new Map(); // username(lower) -> boolean, refreshed each time a DM thread opens
 
 function showCallOverlay() {
@@ -2848,10 +2856,34 @@ function setCallControlsMode(mode) {
   els.callControlsActive.classList.toggle("is-hidden", mode !== "active");
 }
 
+// Swaps the avatar circle for the video boxes (or back) and shows/hides the
+// camera toggle — the one bit of UI that actually differs between voice and
+// video calls. Everything else (name, status, controls) stays the same.
+function applyCallTypeUI(type) {
+  const isVideo = type === "video";
+  els.callModal.classList.toggle("is-video", isVideo);
+  els.callAvatar.classList.toggle("is-hidden", isVideo);
+  els.callVideoStage.classList.toggle("is-hidden", !isVideo);
+  els.callCameraBtn.classList.toggle("is-hidden", !isVideo);
+}
+
+function applyCallVolume(percent) {
+  const v = Math.max(0, Math.min(100, Number(percent))) / 100;
+  els.callRemoteAudio.volume = v;
+  els.callRemoteVideo.volume = v;
+}
+
 function resetCallModal() {
   els.callError.textContent = "";
   els.callMuteBtn.classList.remove("is-muted");
   els.callMuteBtn.textContent = "🎤";
+  els.callCameraBtn.classList.remove("is-muted");
+  els.callCameraBtn.textContent = "📷";
+  els.callVolumeSlider.value = "50";
+  els.callVolumeRow.classList.add("is-hidden");
+  applyCallVolume(50);
+  els.callLocalVideo.srcObject = null;
+  els.callRemoteVideo.srcObject = null;
 }
 
 async function flushIceQueue() {
@@ -2878,13 +2910,33 @@ async function setupPeerConnection() {
     }
   };
   pc.ontrack = (e) => {
-    els.callRemoteAudio.srcObject = e.streams[0];
+    if (!currentCall) return;
+    if (currentCall.type === "video") {
+      els.callRemoteVideo.srcObject = e.streams[0];
+    } else {
+      els.callRemoteAudio.srcObject = e.streams[0];
+    }
   };
   pc.onconnectionstatechange = () => {
     if (!currentCall || pc !== currentCall.pc) return;
     if (pc.connectionState === "connected") {
       els.callStatus.textContent = "Connected";
-    } else if (pc.connectionState === "failed") {
+      els.callVolumeRow.classList.remove("is-hidden");
+      if (currentCall.disconnectTimer) {
+        clearTimeout(currentCall.disconnectTimer);
+        currentCall.disconnectTimer = null;
+      }
+    } else if (pc.connectionState === "disconnected") {
+      // Brief drops often recover on their own — give it a few seconds
+      // before treating the call as actually over for both sides.
+      els.callStatus.textContent = "Reconnecting…";
+      currentCall.disconnectTimer = setTimeout(() => {
+        if (currentCall && currentCall.pc === pc && pc.connectionState !== "connected") {
+          els.callStatus.textContent = "Call disconnected.";
+          hangupCall();
+        }
+      }, 6000);
+    } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       els.callStatus.textContent = "Connection failed.";
       hangupCall();
     }
@@ -2895,6 +2947,7 @@ async function setupPeerConnection() {
 
 function teardownCall() {
   if (currentCall) {
+    if (currentCall.disconnectTimer) clearTimeout(currentCall.disconnectTimer);
     if (currentCall.pc) {
       currentCall.pc.onicecandidate = null;
       currentCall.pc.ontrack = null;
@@ -2905,21 +2958,30 @@ function teardownCall() {
   }
   currentCall = null;
   els.callRemoteAudio.srcObject = null;
+  els.callRemoteVideo.srcObject = null;
+  els.callLocalVideo.srcObject = null;
   hideCallOverlay();
   updateCallButtonVisibility();
 }
 
-async function startCall(peerUsername) {
+// Ending a call always tells the other side too (via call:end/call:decline,
+// relayed by the server to both parties) — there's no "leave and keep the
+// call alive for the other person" state. If a call drops silently (network
+// loss, tab closed without a clean hangup), the connection-state watchdog
+// above and the server's own socket-disconnect cleanup make sure it still
+// ends for both sides rather than leaving one end hanging forever.
+async function startCall(peerUsername, type) {
   if (currentCall) return;
-  currentCall = { role: "caller", peerUsername, callId: null, pc: null, localStream: null, iceQueue: [] };
+  currentCall = { role: "caller", peerUsername, callId: null, type, pc: null, localStream: null, iceQueue: [] };
   resetCallModal();
+  applyCallTypeUI(type);
   setCallPeerDisplay(peerUsername);
   els.callStatus.textContent = "Calling…";
   setCallControlsMode("outgoing");
   showCallOverlay();
   updateCallButtonVisibility();
 
-  socketRef.emit("call:invite", { to: peerUsername }, async (res) => {
+  socketRef.emit("call:invite", { to: peerUsername, type }, async (res) => {
     if (!currentCall || currentCall.peerUsername !== peerUsername || currentCall.role !== "caller") return;
     if (!res || res.error) {
       els.callStatus.textContent = (res && res.error) || "Call failed to start.";
@@ -2928,9 +2990,10 @@ async function startCall(peerUsername) {
     }
     currentCall.callId = res.callId;
     try {
-      currentCall.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      currentCall.localStream = await navigator.mediaDevices.getUserMedia(mediaConstraintsFor(type));
+      if (type === "video") els.callLocalVideo.srcObject = currentCall.localStream;
     } catch {
-      els.callStatus.textContent = "Microphone access was denied.";
+      els.callStatus.textContent = type === "video" ? "Camera/microphone access was denied." : "Microphone access was denied.";
       hangupCall();
     }
   });
@@ -2948,14 +3011,19 @@ function declineCall() {
   teardownCall();
 }
 
+function mediaConstraintsFor(type) {
+  return type === "video" ? { audio: true, video: { width: { ideal: 640 }, height: { ideal: 480 } } } : { audio: true };
+}
+
 async function acceptCall() {
   if (!currentCall || currentCall.role !== "callee") return;
   els.callStatus.textContent = "Connecting…";
   setCallControlsMode("active");
   try {
-    currentCall.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    currentCall.localStream = await navigator.mediaDevices.getUserMedia(mediaConstraintsFor(currentCall.type));
+    if (currentCall.type === "video") els.callLocalVideo.srcObject = currentCall.localStream;
   } catch {
-    els.callError.textContent = "Microphone access was denied.";
+    els.callError.textContent = currentCall.type === "video" ? "Camera/microphone access was denied." : "Microphone access was denied.";
     declineCall();
     return;
   }
@@ -2977,16 +3045,27 @@ function toggleMute() {
   els.callMuteBtn.textContent = track.enabled ? "🎤" : "🔇";
 }
 
-function handleCallIncoming({ callId, from }) {
+function toggleCamera() {
+  if (!currentCall || !currentCall.localStream) return;
+  const track = currentCall.localStream.getVideoTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  els.callCameraBtn.classList.toggle("is-muted", !track.enabled);
+  els.callCameraBtn.textContent = track.enabled ? "📷" : "🚫";
+}
+
+function handleCallIncoming({ callId, from, type }) {
+  const callType = type === "video" ? "video" : "voice";
   if (currentCall) {
     // Already on/ringing another call — auto-decline, like a busy signal.
     socketRef.emit("call:decline", { callId });
     return;
   }
-  currentCall = { role: "callee", peerUsername: from, callId, pc: null, localStream: null, iceQueue: [] };
+  currentCall = { role: "callee", peerUsername: from, callId, type: callType, pc: null, localStream: null, iceQueue: [] };
   resetCallModal();
+  applyCallTypeUI(callType);
   setCallPeerDisplay(from);
-  els.callStatus.textContent = "Incoming call…";
+  els.callStatus.textContent = callType === "video" ? "Incoming video call…" : "Incoming call…";
   setCallControlsMode("incoming");
   showCallOverlay();
   updateCallButtonVisibility();
@@ -3037,17 +3116,26 @@ function handleCallEnded({ callId, reason }) {
   setTimeout(() => teardownCall(), reason === "declined" || reason === "missed" ? 1200 : 0);
 }
 
+// Best-effort: tell the other side right away on tab close/navigation,
+// rather than waiting for the server to notice the socket dropped.
+window.addEventListener("beforeunload", () => {
+  if (currentCall && currentCall.callId) socketRef.emit("call:end", { callId: currentCall.callId });
+});
+
 function updateCallButtonVisibility() {
-  if (!els.callStartBtn) return;
   const isDm = activeConversation && activeConversation.type === "dm";
-  if (!isDm) {
-    els.callStartBtn.classList.add("is-hidden");
-    return;
+  const blocked = isDm && blockedUsers.has(activeConversation.username);
+  const busy = Boolean(currentCall);
+
+  if (els.callStartBtn) {
+    const show = isDm && !blocked && !busy;
+    els.callStartBtn.classList.toggle("is-hidden", !show);
   }
-  const partnerHasBeta = partnerBeta.get(activeConversation.username.toLowerCase());
-  const blocked = blockedUsers.has(activeConversation.username);
-  const show = Boolean(me?.betaFeatures) && partnerHasBeta === true && !blocked && !currentCall;
-  els.callStartBtn.classList.toggle("is-hidden", !show);
+  if (els.callVideoStartBtn) {
+    const partnerHasBeta = isDm && partnerBeta.get(activeConversation.username.toLowerCase()) === true;
+    const show = isDm && !blocked && !busy && Boolean(me?.betaFeatures) && partnerHasBeta;
+    els.callVideoStartBtn.classList.toggle("is-hidden", !show);
+  }
 }
 
 async function refreshPartnerBeta(username) {
@@ -3058,19 +3146,25 @@ async function refreshPartnerBeta(username) {
     partnerProfiles.set(username.toLowerCase(), { avatarUrl: profile.avatarUrl, nameColor: profile.nameColor });
     if (isActiveDm(username)) updateCallButtonVisibility();
   } catch {
-    // Non-critical — the call button just won't show until this succeeds.
+    // Non-critical — the video call button just won't show until this succeeds.
   }
 }
 
 els.callStartBtn?.addEventListener("click", () => {
   if (!activeConversation || activeConversation.type !== "dm") return;
-  startCall(activeConversation.username);
+  startCall(activeConversation.username, "voice");
+});
+els.callVideoStartBtn?.addEventListener("click", () => {
+  if (!activeConversation || activeConversation.type !== "dm") return;
+  startCall(activeConversation.username, "video");
 });
 els.callCancelBtn?.addEventListener("click", hangupCall);
 els.callHangupBtn?.addEventListener("click", hangupCall);
 els.callDeclineBtn?.addEventListener("click", declineCall);
 els.callAcceptBtn?.addEventListener("click", acceptCall);
 els.callMuteBtn?.addEventListener("click", toggleMute);
+els.callCameraBtn?.addEventListener("click", toggleCamera);
+els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVolumeSlider.value));
 
 // ---- Boot --------------------------------------------------------------------
 (async () => {

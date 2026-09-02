@@ -2564,21 +2564,26 @@ io.on("connection", (socket) => {
   // ---- Beta: DM voice calls ---------------------------------------------------
   // DM-only by design — there's no group/global equivalent of these events,
   // so a call can never be started from those threads.
-  socket.on("call:invite", async ({ to }, cb) => {
+  socket.on("call:invite", async ({ to, type } = {}, cb) => {
     if (typeof cb !== "function") return;
     try {
+      const callType = type === "video" ? "video" : "voice";
       if (typeof to !== "string" || !to.trim()) return cb({ error: "Invalid request." });
       if (usernameLower(to) === usernameLower(username)) return cb({ error: "You can't call yourself." });
 
       const target = await getUserByUsername(to);
       if (!target) return cb({ error: "No user with that username." });
 
-      const meRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [userId] });
-      if (!meRow.rows[0]?.beta_features) return cb({ error: "Turn on Beta Features in Settings to make calls." });
+      // Voice calls are a regular feature now — only video calls are still
+      // gated behind Beta Features, and need both sides opted in.
+      if (callType === "video") {
+        const meRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [userId] });
+        if (!meRow.rows[0]?.beta_features) return cb({ error: "Turn on Beta Features in Settings to make video calls." });
 
-      const targetRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [target.id] });
-      if (!targetRow.rows[0]?.beta_features) {
-        return cb({ error: `${target.username} hasn't turned on Beta Features.` });
+        const targetRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [target.id] });
+        if (!targetRow.rows[0]?.beta_features) {
+          return cb({ error: `${target.username} hasn't turned on Beta Features.` });
+        }
       }
 
       const theirRelationToMe = await getRelation(target.id, userId);
@@ -2595,12 +2600,13 @@ io.on("connection", (socket) => {
         calleeId: target.id,
         calleeUsername: target.username,
         status: "ringing",
+        type: callType,
       });
       userCallId.set(userId, callId);
       userCallId.set(target.id, callId);
 
       for (const socketId of onlineSockets.get(target.id) || []) {
-        io.to(socketId).emit("call:incoming", { callId, from: username });
+        io.to(socketId).emit("call:incoming", { callId, from: username, type: callType });
       }
 
       // Missed-call timeout — if nobody answers, tear it down so both sides
