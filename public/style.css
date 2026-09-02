@@ -2083,14 +2083,11 @@ img.avatar {
 }
 
 .call-modal.is-video {
-  max-width: 480px;
-}
-
-.call-modal.is-video {
   max-width: 90%;
   width: 90%;
   max-height: 90vh;
   height: 90vh;
+  padding: 14px 14px 12px;
 }
 
 /* Keep the video call sized against the main content area, not the whole
@@ -2110,17 +2107,35 @@ img.avatar {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 0;
 }
 
 .call-modal.is-video .call-video-stage {
   flex: 1;
   min-height: 0;
   aspect-ratio: unset;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
+/* Video calls keep the bottom chrome (name/status/controls) as small as
+   possible so almost the whole modal is the camera feed. */
 .call-modal.is-video h2 {
-  font-size: 1.1rem;
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.call-modal.is-video .call-stage p {
+  font-size: 0.78rem;
+  margin: 0 0 6px;
+}
+
+.call-modal.is-video .call-controls {
+  margin-top: 8px;
+  gap: 12px;
+}
+
+.call-modal.is-video .call-volume-row {
+  margin-top: 6px;
 }
 
 .call-video-stage {
@@ -2136,7 +2151,9 @@ img.avatar {
 .call-remote-video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* contain, not cover — a camera's native aspect ratio rarely matches the
+     modal exactly, and we'd rather letterbox than crop the picture. */
+  object-fit: contain;
   display: block;
   background: #14171f;
 }
