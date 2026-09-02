@@ -227,6 +227,50 @@
     </div>
   </div>
 
+  <!-- Group call modal (Beta): mesh voice/video calls for group chats, with a
+       "default" (active speaker) / "gallery" (everyone at once) layout toggle. -->
+  <div class="modal-overlay is-hidden" id="groupcall-overlay">
+    <div class="modal call-modal groupcall-modal" id="groupcall-modal" role="dialog" aria-modal="true" aria-label="Group call">
+      <div class="groupcall-header">
+        <h2 id="groupcall-title">Group call</h2>
+        <button type="button" class="icon-btn is-hidden" id="groupcall-layout-btn" title="Switch layout">🖼️ Gallery</button>
+      </div>
+      <p id="groupcall-status">Calling…</p>
+      <div class="groupcall-stage is-hidden" id="groupcall-stage">
+        <div class="groupcall-grid" id="groupcall-grid"></div>
+      </div>
+      <p class="settings-error" id="groupcall-error"></p>
+      <div class="call-volume-row is-hidden" id="groupcall-volume-row">
+        <span aria-hidden="true">🔊</span>
+        <input type="range" id="groupcall-volume" min="0" max="100" value="50" aria-label="Call volume" />
+      </div>
+      <div class="call-controls" id="groupcall-controls-outgoing">
+        <button type="button" class="btn call-btn-danger" id="groupcall-cancel-btn">Cancel</button>
+      </div>
+      <div class="call-controls is-hidden" id="groupcall-controls-active">
+        <button type="button" class="icon-btn" id="groupcall-mute-btn" aria-label="Mute microphone" title="Mute">🎤</button>
+        <button type="button" class="icon-btn is-hidden" id="groupcall-camera-btn" aria-label="Turn off camera" title="Camera">📷</button>
+        <button type="button" class="btn call-btn-danger" id="groupcall-leave-btn">Leave call</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Incoming group call ring — separate from the outgoing/active modal above
+       since you can get rung for a group call without having started it. -->
+  <div class="modal-overlay is-hidden" id="groupcall-incoming-overlay">
+    <div class="modal call-modal" id="groupcall-incoming-modal" role="dialog" aria-modal="true" aria-label="Incoming group call">
+      <div class="call-stage">
+        <div class="avatar call-avatar"><span aria-hidden="true">👥</span></div>
+        <h2 id="groupcall-incoming-title">—</h2>
+        <p id="groupcall-incoming-status">Incoming group call…</p>
+      </div>
+      <div class="call-controls">
+        <button type="button" class="btn call-btn-danger" id="groupcall-decline-btn">Decline</button>
+        <button type="button" class="btn call-btn-accept" id="groupcall-accept-btn">Join</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings modal -->
   <div class="modal-overlay is-hidden" id="settings-overlay">
     <div class="modal" id="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
@@ -311,7 +355,7 @@
 
         <section class="settings-section">
           <h3>Beta Features</h3>
-          <p class="settings-hint" id="beta-features-status">Turn on early access features — right now that's video calls in DMs with other people who also have it enabled. Voice calls don't need this.</p>
+          <p class="settings-hint" id="beta-features-status">Turn on early access features — right now that's voice and video calls in group chats. You'll only be rung for a group call, and can only join one, if you have this on — same for everyone else in the group. DMs don't need this.</p>
           <label class="beta-toggle-row">
             <input type="checkbox" id="beta-features-toggle" />
             <span>Enable Beta Features</span>

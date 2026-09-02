@@ -26,6 +26,19 @@ const onlineUsers = new Map(); // lowercased username -> display-cased username,
 // Global Chat headcount/popover.
 const typingUsers = new Map(); // scope key -> Map(username -> timeoutId)
 
+// ---- @mentions / pings -----------------------------------------------------------
+// A registry of every username we've seen mentioned anywhere (conversation
+// list, group rosters, online users, message senders) so `@word` tokens in
+// message bodies can be recognized and highlighted as real mentions rather
+// than arbitrary text — kept as lowercase -> real-cased.
+const knownUsernames = new Map();
+function noteKnownUsername(username) {
+  if (username) knownUsernames.set(username.toLowerCase(), username);
+}
+let globalHasUnreadPing = false; // Global Chat has no general unread system (too high-
+// traffic for "every message" to count) — but a ping should still surface,
+// so this flags "you were pinged in Global Chat since you last opened it."
+
 // ---- Windowed history loading ---------------------------------------------------
 // Every thread (a DM, the global room, or a group) keeps at most HISTORY_PAGE_SIZE
 // messages loaded in memory/DOM at once. Scrolling to the top loads the next
@@ -298,6 +311,27 @@ const els = {
   callMuteBtn: document.getElementById("call-mute-btn"),
   callCameraBtn: document.getElementById("call-camera-btn"),
   onlinePopoverTitle: document.getElementById("online-popover-title"),
+
+  groupcallOverlay: document.getElementById("groupcall-overlay"),
+  groupcallTitle: document.getElementById("groupcall-title"),
+  groupcallLayoutBtn: document.getElementById("groupcall-layout-btn"),
+  groupcallStatus: document.getElementById("groupcall-status"),
+  groupcallStage: document.getElementById("groupcall-stage"),
+  groupcallGrid: document.getElementById("groupcall-grid"),
+  groupcallError: document.getElementById("groupcall-error"),
+  groupcallVolumeRow: document.getElementById("groupcall-volume-row"),
+  groupcallVolumeSlider: document.getElementById("groupcall-volume"),
+  groupcallControlsOutgoing: document.getElementById("groupcall-controls-outgoing"),
+  groupcallControlsActive: document.getElementById("groupcall-controls-active"),
+  groupcallCancelBtn: document.getElementById("groupcall-cancel-btn"),
+  groupcallLeaveBtn: document.getElementById("groupcall-leave-btn"),
+  groupcallMuteBtn: document.getElementById("groupcall-mute-btn"),
+  groupcallCameraBtn: document.getElementById("groupcall-camera-btn"),
+  groupcallIncomingOverlay: document.getElementById("groupcall-incoming-overlay"),
+  groupcallIncomingTitle: document.getElementById("groupcall-incoming-title"),
+  groupcallIncomingStatus: document.getElementById("groupcall-incoming-status"),
+  groupcallDeclineBtn: document.getElementById("groupcall-decline-btn"),
+  groupcallAcceptBtn: document.getElementById("groupcall-accept-btn"),
 
   plusBtn: document.getElementById("plus-btn"),
   plusMenu: document.getElementById("plus-menu"),
@@ -831,16 +865,37 @@ function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return
 function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname)||/(^|\.)tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
 function gifDisplayUrl(url){try{const u=new URL(url);if(/(^|\.)tenor\.com$/i.test(u.hostname)||/(^|\.)media\.tenor\.com$/i.test(u.hostname))return `/api/gifs/tenor-proxy?url=${encodeURIComponent(url)}`;}catch{}return url}
 
+function renderMentionToken(uname) {
+  const known = knownUsernames.get(uname.toLowerCase());
+  const isMe = Boolean(me) && sameUsername(uname, me.username);
+  if (!known && !isMe) return escapeHtml("@" + uname); // not a recognized username — leave as plain text
+  return `<span class="mention${isMe ? " is-me" : ""}">@${escapeHtml(known || uname)}</span>`;
+}
+
+// Word-bounded, case-insensitive: true if `body` pings `username` specifically
+// (used to decide whether to highlight a bubble / mark a thread as pinged,
+// independent of whether that username is in our locally-known-users set).
+function isMentionOf(body, username) {
+  if (!username) return false;
+  const escaped = String(username).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(^|[^a-zA-Z0-9_])@${escaped}(?![a-zA-Z0-9_])`, "i");
+  return re.test(String(body || ""));
+}
+
 function renderLinkedText(raw){
   const text=String(raw||"");
-  const re=/https?:\/\/[^\s<>]+/ig;
+  const re=/https?:\/\/[^\s<>]+|(?<![a-zA-Z0-9_])@([a-zA-Z0-9_]{3,20})/g;
   let out="", last=0, match;
   while((match=re.exec(text))){
-    const url=match[0].replace(/[),.!?]+$/g,"");
-    const trailing=match[0].slice(url.length);
     out+=escapeHtml(text.slice(last,match.index));
-    out+=`<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
-    out+=escapeHtml(trailing);
+    if (match[0][0] === "@") {
+      out+=renderMentionToken(match[1]);
+    } else {
+      const url=match[0].replace(/[),.!?]+$/g,"");
+      const trailing=match[0].slice(url.length);
+      out+=`<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
+      out+=escapeHtml(trailing);
+    }
     last=match.index+match[0].length;
   }
   return out+escapeHtml(text.slice(last));
@@ -850,6 +905,7 @@ function renderLinkedText(raw){
 
 async function openThread(username) {
   activeConversation = { type: "dm", username };
+  noteKnownUsername(username);
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
   els.threadTitle.textContent = "@" + username;
@@ -901,6 +957,8 @@ async function openGlobal() {
   cancelReply();
   closeEmojiPanel();
   els.globalBtn.classList.add("active");
+  globalHasUnreadPing = false;
+  renderGlobalUnreadIndicator();
   renderConversationList();
   renderTypingIndicator();
   renderOnlineBadges();
@@ -923,6 +981,8 @@ els.globalBtn.addEventListener("click", openGlobal);
 // ---- Opening a group thread ----------------------------------------------------
 async function openGroupThread(groupId) {
   activeConversation = { type: "group", id: groupId };
+  const g = groups.find((x) => x.id === groupId);
+  (g?.members || []).forEach((m) => noteKnownUsername(m.username));
   els.emptyState.classList.add("is-hidden");
   els.threadView.classList.remove("is-hidden");
   els.sidebar.classList.add("hide-on-mobile");
@@ -1143,7 +1203,9 @@ function renderBubble(m, kind) {
   else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(gifDisplayUrl(detectedGif))}" alt="GIF" loading="lazy" /><a class="embed-source-link" href="${escapeHtml(detectedGif)}" target="_blank" rel="noopener noreferrer">Open GIF</a></div>`;
   else bubbleInner=`<div class="bubble ${side}">${replyQuote}${renderLinkedText(m.body)}</div>`;
 
-  return `<div class="bubble-group ${side}" data-id="${m.id ?? ""}">
+  const isPingedHere = !m.mine && m.type === "text" && isMentionOf(m.body, me?.username);
+
+  return `<div class="bubble-group ${side}${isPingedHere ? " is-mentioned" : ""}" data-id="${m.id ?? ""}">
     ${senderLabel}
     <div class="bubble-row">${bubbleInner}${actions}</div>
     <div class="bubble-meta-row">${timestamp}${editedTag}${seen}</div>
@@ -1187,6 +1249,10 @@ function appendMessage(username, body, mine, type = "text", extra = {}) {
   });
   trimIfNeeded("dm", username);
   if (isActiveDm(username)) renderThread();
+}
+
+function renderGlobalUnreadIndicator() {
+  els.globalBtn?.classList.toggle("has-unread", globalHasUnreadPing);
 }
 
 function appendGlobalMessage(sender, body, mine, type = "text", extra = {}) {
@@ -3127,17 +3193,23 @@ window.addEventListener("beforeunload", () => {
 
 function updateCallButtonVisibility() {
   const isDm = activeConversation && activeConversation.type === "dm";
+  const isGroup = activeConversation && activeConversation.type === "group";
   const blocked = isDm && blockedUsers.has(activeConversation.username);
-  const busy = Boolean(currentCall);
+  const busy = Boolean(currentCall) || Boolean(groupCall);
+  // Group calls are Beta-gated — only shown to a member who has Beta
+  // Features on themselves (whether anyone else in the group does is
+  // discovered when the call actually starts/rings).
+  const groupCallsAvailable = isGroup && Boolean(me?.betaFeatures);
 
   if (els.callStartBtn) {
-    const show = isDm && !blocked && !busy;
+    const show = (isDm && !blocked && !busy) || (groupCallsAvailable && !busy);
     els.callStartBtn.classList.toggle("is-hidden", !show);
+    els.callStartBtn.title = isGroup ? "Start a group voice call (Beta)" : "Voice call";
   }
   if (els.callVideoStartBtn) {
-    const partnerHasBeta = isDm && partnerBeta.get(activeConversation.username.toLowerCase()) === true;
-    const show = isDm && !blocked && !busy && Boolean(me?.betaFeatures) && partnerHasBeta;
+    const show = (isDm && !blocked && !busy) || (groupCallsAvailable && !busy);
     els.callVideoStartBtn.classList.toggle("is-hidden", !show);
+    els.callVideoStartBtn.title = isGroup ? "Start a group video call (Beta)" : "Video call";
   }
 }
 
@@ -3154,12 +3226,14 @@ async function refreshPartnerBeta(username) {
 }
 
 els.callStartBtn?.addEventListener("click", () => {
-  if (!activeConversation || activeConversation.type !== "dm") return;
-  startCall(activeConversation.username, "voice");
+  if (!activeConversation) return;
+  if (activeConversation.type === "dm") startCall(activeConversation.username, "voice");
+  else if (activeConversation.type === "group") startGroupCall(activeConversation.id, "voice");
 });
 els.callVideoStartBtn?.addEventListener("click", () => {
-  if (!activeConversation || activeConversation.type !== "dm") return;
-  startCall(activeConversation.username, "video");
+  if (!activeConversation) return;
+  if (activeConversation.type === "dm") startCall(activeConversation.username, "video");
+  else if (activeConversation.type === "group") startGroupCall(activeConversation.id, "video");
 });
 els.callCancelBtn?.addEventListener("click", hangupCall);
 els.callHangupBtn?.addEventListener("click", hangupCall);
@@ -3168,6 +3242,373 @@ els.callAcceptBtn?.addEventListener("click", acceptCall);
 els.callMuteBtn?.addEventListener("click", toggleMute);
 els.callCameraBtn?.addEventListener("click", toggleCamera);
 els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVolumeSlider.value));
+
+// ---- Beta: Group voice & video calls -------------------------------------------
+// Full-mesh: this tab holds one RTCPeerConnection per other participant.
+// groupCall = { callId, groupId, type, joined, localStream, layout,
+//   peers: Map(userId -> { username, pc, stream, iceQueue, analyser, speaking }),
+//   incoming: { callId, groupId, from, type } | null }
+let groupCall = null;
+let groupCallSpeakerTimer = null;
+
+function groupDisplayNameFor(groupId) {
+  const g = groups.find((x) => x.id === groupId);
+  return g ? groupDisplayName(g) : "Group";
+}
+
+function showGroupcallOverlay() { els.groupcallOverlay.classList.remove("is-hidden"); }
+function hideGroupcallOverlay() { els.groupcallOverlay.classList.add("is-hidden"); }
+function showGroupcallIncoming() { els.groupcallIncomingOverlay.classList.remove("is-hidden"); }
+function hideGroupcallIncoming() { els.groupcallIncomingOverlay.classList.add("is-hidden"); }
+
+function groupcallApplyVolume(percent) {
+  const v = Math.max(0, Math.min(100, Number(percent))) / 100;
+  els.groupcallGrid.querySelectorAll("video").forEach((v2) => { if (!v2.muted) v2.volume = v; });
+}
+
+// Builds/refreshes one <video>+label tile per participant (including
+// yourself) and lays them out per the current layout mode. Called any time
+// the roster, a stream, or the active speaker changes.
+function renderGroupcallGrid() {
+  if (!groupCall || !groupCall.joined) return;
+  const isDefault = groupCall.layout === "default";
+  els.groupcallGrid.classList.toggle("is-default", isDefault);
+
+  const tiles = [];
+  // "Myself" tile.
+  tiles.push({ id: "me", username: `${me.username} (you)`, stream: groupCall.localStream, muted: true, speaking: false, isVideo: groupCall.type === "video" });
+  for (const [userId, p] of groupCall.peers) {
+    tiles.push({ id: String(userId), username: p.username, stream: p.stream, muted: false, speaking: Boolean(p.speaking), isVideo: groupCall.type === "video" });
+  }
+
+  // Reuse existing tile elements where possible so <video> elements don't
+  // get torn down/recreated (which would restart playback) every render.
+  const existing = new Map([...els.groupcallGrid.querySelectorAll(".groupcall-tile")].map((el) => [el.dataset.id, el]));
+  const strip = isDefault ? document.createElement("div") : null;
+  if (strip) strip.className = "groupcall-tile-strip";
+
+  let activeSpeakerId = groupCall.activeSpeakerId && tiles.some((t) => t.id === groupCall.activeSpeakerId) ? groupCall.activeSpeakerId : "me";
+
+  const frag = document.createDocumentFragment();
+  tiles.forEach((t) => {
+    let el = existing.get(t.id);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "groupcall-tile";
+      el.dataset.id = t.id;
+      el.innerHTML = `<video autoplay playsinline${t.muted ? " muted" : ""}></video><div class="groupcall-tile-avatar">${escapeHtml(initialFor(t.username))}</div><div class="groupcall-tile-label"></div>`;
+    }
+    existing.delete(t.id);
+    const videoEl = el.querySelector("video");
+    if (videoEl.srcObject !== (t.stream || null)) videoEl.srcObject = t.stream || null;
+    el.classList.toggle("is-voice-only", !t.isVideo || !t.stream || t.stream.getVideoTracks().every((tr) => !tr.enabled));
+    el.classList.toggle("is-speaking", t.speaking);
+    el.classList.toggle("is-active-speaker", t.id === activeSpeakerId);
+    el.querySelector(".groupcall-tile-label").textContent = t.username;
+    if (isDefault && t.id !== activeSpeakerId) strip.appendChild(el);
+    else frag.appendChild(el);
+  });
+  existing.forEach((el) => el.remove()); // stale tiles for people who left
+
+  els.groupcallGrid.innerHTML = "";
+  els.groupcallGrid.appendChild(frag);
+  if (isDefault) els.groupcallGrid.appendChild(strip);
+}
+
+function setGroupcallLayout(layout) {
+  if (!groupCall) return;
+  groupCall.layout = layout;
+  els.groupcallLayoutBtn.textContent = layout === "default" ? "🖼️ Gallery" : "🗣️ Speaker";
+  renderGroupcallGrid();
+}
+
+// Lightweight active-speaker detection: an AnalyserNode per stream, polled
+// on an interval, comparing average volume across everyone currently on
+// the call so the "default" layout can feature whoever's loudest.
+function attachSpeakerMeter(id, stream) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    return { ctx, analyser, data: new Uint8Array(analyser.frequencyBinCount) };
+  } catch {
+    return null;
+  }
+}
+
+function startSpeakerMetering() {
+  stopSpeakerMetering();
+  groupCallSpeakerTimer = setInterval(() => {
+    if (!groupCall || !groupCall.joined) return;
+    let loudestId = null;
+    let loudestLevel = 12; // floor, so silence doesn't constantly flip the "active" tile
+    const check = (id, meter) => {
+      if (!meter) return 0;
+      meter.analyser.getByteFrequencyData(meter.data);
+      let sum = 0;
+      for (let i = 0; i < meter.data.length; i++) sum += meter.data[i];
+      const level = sum / meter.data.length;
+      return level;
+    };
+    if (groupCall.localMeter) {
+      const level = check("me", groupCall.localMeter);
+      const speaking = level > 12;
+      if (speaking !== groupCall.localSpeaking) { groupCall.localSpeaking = speaking; }
+      if (level > loudestLevel) { loudestLevel = level; loudestId = "me"; }
+    }
+    for (const [userId, p] of groupCall.peers) {
+      const level = check(String(userId), p.meter);
+      const speaking = level > 12;
+      if (speaking !== p.speaking) { p.speaking = speaking; renderGroupcallGrid(); }
+      if (level > loudestLevel) { loudestLevel = level; loudestId = String(userId); }
+    }
+    if (loudestId && loudestId !== groupCall.activeSpeakerId) {
+      groupCall.activeSpeakerId = loudestId;
+      if (groupCall.layout === "default") renderGroupcallGrid();
+    }
+  }, 600);
+}
+function stopSpeakerMetering() {
+  if (groupCallSpeakerTimer) clearInterval(groupCallSpeakerTimer);
+  groupCallSpeakerTimer = null;
+}
+
+function teardownGroupCall() {
+  if (groupCall) {
+    if (groupCall.callId) socketRef.emit("groupcall:leave", { callId: groupCall.callId });
+    for (const [, p] of groupCall.peers) {
+      if (p.pc) { p.pc.onicecandidate = null; p.pc.ontrack = null; p.pc.close(); }
+      if (p.meter && p.meter.ctx) p.meter.ctx.close().catch(() => {});
+    }
+    if (groupCall.localStream) groupCall.localStream.getTracks().forEach((t) => t.stop());
+    if (groupCall.localMeter && groupCall.localMeter.ctx) groupCall.localMeter.ctx.close().catch(() => {});
+  }
+  stopSpeakerMetering();
+  groupCall = null;
+  els.groupcallGrid.innerHTML = "";
+  hideGroupcallOverlay();
+  updateCallButtonVisibility();
+}
+
+function createGroupPeerConnection(userId) {
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  const peer = groupCall.peers.get(userId);
+  peer.pc = pc;
+  peer.iceQueue = [];
+  if (groupCall.localStream) groupCall.localStream.getTracks().forEach((track) => pc.addTrack(track, groupCall.localStream));
+  pc.onicecandidate = (e) => {
+    if (e.candidate && groupCall) {
+      socketRef.emit("groupcall:signal", { callId: groupCall.callId, to: userId, data: { type: "ice-candidate", candidate: e.candidate } });
+    }
+  };
+  pc.ontrack = (e) => {
+    const p = groupCall && groupCall.peers.get(userId);
+    if (!p) return;
+    p.stream = e.streams[0];
+    p.meter = attachSpeakerMeter(userId, p.stream);
+    renderGroupcallGrid();
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      // Let the roster event (participant-left) clean this up rather than
+      // tearing down the whole call over one bad peer link.
+    }
+  };
+  return pc;
+}
+
+async function flushGroupIceQueue(userId) {
+  const p = groupCall && groupCall.peers.get(userId);
+  if (!p || !p.pc || !p.iceQueue || !p.iceQueue.length) return;
+  const queue = p.iceQueue;
+  p.iceQueue = [];
+  for (const candidate of queue) {
+    try { await p.pc.addIceCandidate(candidate); } catch { /* benign */ }
+  }
+}
+
+async function connectToGroupPeer(userId, username) {
+  groupCall.peers.set(userId, { username, pc: null, stream: null, iceQueue: [], speaking: false, meter: null });
+  const pc = createGroupPeerConnection(userId);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socketRef.emit("groupcall:signal", { callId: groupCall.callId, to: userId, data: { type: "offer", sdp: pc.localDescription } });
+  renderGroupcallGrid();
+}
+
+async function joinGroupCallNow(groupId, type, callId) {
+  resetGroupcallModal();
+  els.groupcallTitle.textContent = groupDisplayNameFor(groupId);
+  els.groupcallStatus.textContent = "Connecting…";
+  els.groupcallStage.classList.remove("is-hidden");
+  els.groupcallControlsOutgoing.classList.add("is-hidden");
+  els.groupcallControlsActive.classList.remove("is-hidden");
+  els.groupcallCameraBtn.classList.toggle("is-hidden", type !== "video");
+  els.groupcallLayoutBtn.classList.remove("is-hidden");
+  showGroupcallOverlay();
+
+  try {
+    groupCall.localStream = await navigator.mediaDevices.getUserMedia(mediaConstraintsFor(type));
+    groupCall.localMeter = attachSpeakerMeter("me", groupCall.localStream);
+  } catch {
+    els.groupcallError.textContent = type === "video" ? "Camera/microphone access was denied." : "Microphone access was denied.";
+    teardownGroupCall();
+    return;
+  }
+
+  socketRef.emit("groupcall:join", { groupId, type }, async (res) => {
+    if (!groupCall) return;
+    if (!res || res.error) {
+      els.groupcallError.textContent = (res && res.error) || "Couldn't join the call.";
+      setTimeout(() => teardownGroupCall(), 1500);
+      return;
+    }
+    groupCall.callId = res.callId;
+    groupCall.type = res.type;
+    groupCall.joined = true;
+    els.groupcallStatus.textContent = "Connected";
+    els.groupcallVolumeRow.classList.remove("is-hidden");
+    for (const p of res.participants || []) {
+      await connectToGroupPeer(p.userId, p.username);
+    }
+    renderGroupcallGrid();
+    startSpeakerMetering();
+  });
+}
+
+function resetGroupcallModal() {
+  els.groupcallError.textContent = "";
+  els.groupcallMuteBtn.classList.remove("is-muted");
+  els.groupcallMuteBtn.textContent = "🎤";
+  els.groupcallCameraBtn.classList.remove("is-muted");
+  els.groupcallCameraBtn.textContent = "📷";
+  els.groupcallVolumeSlider.value = "50";
+  els.groupcallVolumeRow.classList.add("is-hidden");
+  els.groupcallStage.classList.add("is-hidden");
+}
+
+function startGroupCall(groupId, type) {
+  if (groupCall || currentCall) return;
+  groupCall = { callId: null, groupId, type, joined: false, localStream: null, localMeter: null, layout: "default", peers: new Map(), activeSpeakerId: "me" };
+  updateCallButtonVisibility();
+  joinGroupCallNow(groupId, type, null);
+}
+
+function leaveGroupCall() {
+  teardownGroupCall();
+}
+
+function groupcallToggleMute() {
+  if (!groupCall || !groupCall.localStream) return;
+  const track = groupCall.localStream.getAudioTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  els.groupcallMuteBtn.classList.toggle("is-muted", !track.enabled);
+  els.groupcallMuteBtn.textContent = track.enabled ? "🎤" : "🔇";
+}
+
+function groupcallToggleCamera() {
+  if (!groupCall || !groupCall.localStream) return;
+  const track = groupCall.localStream.getVideoTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  els.groupcallCameraBtn.classList.toggle("is-muted", !track.enabled);
+  els.groupcallCameraBtn.textContent = track.enabled ? "📷" : "🚫";
+  renderGroupcallGrid();
+}
+
+function handleGroupcallIncoming({ callId, groupId, from, type }) {
+  // Already on a call of any kind — treat like a busy signal, decline
+  // automatically rather than showing a second ring.
+  if (currentCall || groupCall) {
+    socketRef.emit("groupcall:leave", { callId }); // no-op if never joined, harmless
+    return;
+  }
+  els.groupcallIncomingTitle.textContent = groupDisplayNameFor(groupId);
+  els.groupcallIncomingStatus.textContent = `${from} started a ${type === "video" ? "video" : "voice"} call…`;
+  els.groupcallIncomingOverlay.dataset.callId = callId;
+  els.groupcallIncomingOverlay.dataset.groupId = groupId;
+  els.groupcallIncomingOverlay.dataset.type = type;
+  showGroupcallIncoming();
+  setTimeout(() => {
+    if (els.groupcallIncomingOverlay.dataset.callId === callId) hideGroupcallIncoming();
+  }, 45000);
+}
+
+function handleGroupcallParticipantJoined({ callId, userId, username }) {
+  if (!groupCall || groupCall.callId !== callId || !groupCall.joined) return;
+  if (groupCall.peers.has(userId)) return;
+  // Wait for their offer — the newly-joined side always initiates (see
+  // groupcall:join on the server, which tells the joiner who's already
+  // there so it can connect() to each of them).
+  groupCall.peers.set(userId, { username, pc: null, stream: null, iceQueue: [], speaking: false, meter: null });
+  renderGroupcallGrid();
+}
+
+function handleGroupcallParticipantLeft({ callId, userId }) {
+  if (!groupCall || groupCall.callId !== callId) return;
+  const p = groupCall.peers.get(userId);
+  if (p) {
+    if (p.pc) { p.pc.onicecandidate = null; p.pc.ontrack = null; p.pc.close(); }
+    if (p.meter && p.meter.ctx) p.meter.ctx.close().catch(() => {});
+  }
+  groupCall.peers.delete(userId);
+  if (groupCall.activeSpeakerId === String(userId)) groupCall.activeSpeakerId = "me";
+  renderGroupcallGrid();
+}
+
+async function handleGroupcallSignal({ callId, from, fromUsername, data }) {
+  if (!groupCall || groupCall.callId !== callId || !data) return;
+  let p = groupCall.peers.get(from);
+  if (!p) {
+    p = { username: fromUsername, pc: null, stream: null, iceQueue: [], speaking: false, meter: null };
+    groupCall.peers.set(from, p);
+  }
+  if (data.type === "offer") {
+    if (!p.pc) createGroupPeerConnection(from);
+    await p.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    await flushGroupIceQueue(from);
+    const answer = await p.pc.createAnswer();
+    await p.pc.setLocalDescription(answer);
+    socketRef.emit("groupcall:signal", { callId, to: from, data: { type: "answer", sdp: p.pc.localDescription } });
+    renderGroupcallGrid();
+  } else if (data.type === "answer") {
+    if (p.pc) {
+      await p.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      await flushGroupIceQueue(from);
+    }
+  } else if (data.type === "ice-candidate") {
+    if (p.pc && p.pc.remoteDescription && p.pc.remoteDescription.type) {
+      try { await p.pc.addIceCandidate(data.candidate); } catch { /* benign */ }
+    } else {
+      p.iceQueue = p.iceQueue || [];
+      p.iceQueue.push(data.candidate);
+    }
+  }
+}
+
+window.addEventListener("beforeunload", () => {
+  if (groupCall && groupCall.callId) socketRef.emit("groupcall:leave", { callId: groupCall.callId });
+});
+
+els.groupcallCancelBtn?.addEventListener("click", leaveGroupCall);
+els.groupcallLeaveBtn?.addEventListener("click", leaveGroupCall);
+els.groupcallMuteBtn?.addEventListener("click", groupcallToggleMute);
+els.groupcallCameraBtn?.addEventListener("click", groupcallToggleCamera);
+els.groupcallVolumeSlider?.addEventListener("input", () => groupcallApplyVolume(els.groupcallVolumeSlider.value));
+els.groupcallLayoutBtn?.addEventListener("click", () => setGroupcallLayout(groupCall?.layout === "default" ? "gallery" : "default"));
+
+els.groupcallAcceptBtn?.addEventListener("click", () => {
+  const { callId, groupId, type } = els.groupcallIncomingOverlay.dataset;
+  hideGroupcallIncoming();
+  if (currentCall || groupCall) return;
+  groupCall = { callId: null, groupId: Number(groupId), type, joined: false, localStream: null, localMeter: null, layout: "default", peers: new Map(), activeSpeakerId: "me" };
+  updateCallButtonVisibility();
+  joinGroupCallNow(Number(groupId), type, callId);
+});
+els.groupcallDeclineBtn?.addEventListener("click", hideGroupcallIncoming);
 
 // ---- Boot --------------------------------------------------------------------
 (async () => {
@@ -3178,6 +3619,7 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
   }
   els.whoAmI.textContent = "@" + me.username;
   applyCustomBackground();
+  noteKnownUsername(me.username);
 
   updateNotifBanner();
 
@@ -3187,6 +3629,8 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
 
   await loadConversations();
   await loadGroups();
+  conversations.forEach((c) => noteKnownUsername(c.username));
+  groups.forEach((g) => (g.members || []).forEach((m) => noteKnownUsername(m.username)));
 
   try {
     const presence = await apiGet("/api/presence");
@@ -3198,7 +3642,7 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
 
   try {
     const online = await apiGet("/api/online");
-    (online.online || []).forEach((u) => onlineUsers.set(u.toLowerCase(), u));
+    (online.online || []).forEach((u) => { onlineUsers.set(u.toLowerCase(), u); noteKnownUsername(u); });
     renderOnlineBadges();
   } catch {
     // Non-critical — the headcount just won't show until the first live update.
@@ -3209,6 +3653,7 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
   socket.on("connect", reportFocusState);
 
   socket.on("message", ({ id, from, body, type, reply }) => {
+    noteKnownUsername(from);
     const active = isActiveDm(from) && document.hasFocus();
     appendMessage(from, body, false, type || "text", { id, reply });
     bumpConversationPreview(from, body, type || "text", { incrementUnread: !active });
@@ -3237,6 +3682,12 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
   });
 
   socket.on("global-message", ({ id, sender, nameColor, avatarUrl, body, type, reply }) => {
+    noteKnownUsername(sender);
+    const activeAndFocused = activeConversation && activeConversation.type === "global" && document.hasFocus();
+    if (!activeAndFocused && type === "text" && isMentionOf(body, me?.username)) {
+      globalHasUnreadPing = true;
+      renderGlobalUnreadIndicator();
+    }
     appendGlobalMessage(sender, body, false, type || "text", { id, nameColor, avatarUrl, reply });
     noteTyping("global", sender, false);
   });
@@ -3266,6 +3717,7 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
   });
 
   socket.on("group-message", ({ groupId, id, sender, nameColor, avatarUrl, body, type, reply }) => {
+    noteKnownUsername(sender);
     const active = isActiveGroup(groupId) && document.hasFocus();
     appendGroupMessage(groupId, sender, body, false, type || "text", { id, nameColor, avatarUrl, reply });
     if (type !== "system") {
@@ -3292,6 +3744,7 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
   // Fired on group creation, rename, and adding members — same shape each
   // time, so one handler upserts the group whether we already had it or not.
   socket.on("group-updated", (payload) => {
+    (payload.members || []).forEach((m) => noteKnownUsername(m.username));
     upsertGroup(payload);
     renderConversationList();
     if (isActiveGroup(payload.id)) {
@@ -3332,7 +3785,7 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
 
   socket.on("online-changed", ({ username, online }) => {
     const key = username.toLowerCase();
-    if (online) onlineUsers.set(key, username);
+    if (online) { onlineUsers.set(key, username); noteKnownUsername(username); }
     else onlineUsers.delete(key);
     renderOnlineBadges();
   });
@@ -3341,6 +3794,11 @@ els.callVolumeSlider?.addEventListener("input", () => applyCallVolume(els.callVo
   socket.on("call:accepted", handleCallAccepted);
   socket.on("call:signal", handleCallSignal);
   socket.on("call:ended", handleCallEnded);
+
+  socket.on("groupcall:incoming", handleGroupcallIncoming);
+  socket.on("groupcall:participant-joined", handleGroupcallParticipantJoined);
+  socket.on("groupcall:participant-left", handleGroupcallParticipantLeft);
+  socket.on("groupcall:signal", handleGroupcallSignal);
 
   // If a DM thread is open when the tab regains focus, treat its messages
   // as read now rather than waiting for the next interaction.

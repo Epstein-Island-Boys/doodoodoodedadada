@@ -250,10 +250,11 @@ async function initDb() {
   if (!userColumns.includes("is_admin")) {
     await db.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
   }
-  // Beta Features: an opt-in flag a user flips on in Settings. Right now the
-  // only thing gated behind it is DM voice calling — both sides of a DM need
-  // it enabled before the call button shows up (see the call: socket
-  // handlers near the bottom of this file).
+  // Beta Features: an opt-in flag a user flips on in Settings. DM voice and
+  // video calls are regular features now — this flag only gates group voice
+  // and video calls (see the groupcall: socket handlers near the bottom of
+  // this file). Only group members with it enabled get rung when someone
+  // starts a group call.
   if (!userColumns.includes("beta_features")) {
     await db.execute("ALTER TABLE users ADD COLUMN beta_features INTEGER NOT NULL DEFAULT 0");
   }
@@ -2450,13 +2451,47 @@ const onlineSockets = new Map();
 // without a DB round-trip. Populated/cleared alongside onlineSockets.
 const onlineUserNames = new Map();
 
-// ---- Beta: DM voice calls ----------------------------------------------------
+// ---- DM voice & video calls ---------------------------------------------------
 // callId -> { callerId, callerUsername, calleeId, calleeUsername, status }
 // status is "ringing" until the callee accepts, then "active" until either
 // side ends it. userId -> callId lets us quickly tell if someone's already
 // on/ringing a call, and clean things up if their socket drops mid-call.
+// Shared with group calls below (a userId can only be in one DM call OR one
+// group call at a time — userCallId and userGroupCallId are checked against
+// each other before either kind of call can start).
 const activeCalls = new Map();
 const userCallId = new Map();
+
+// ---- Beta: Group voice & video calls ------------------------------------------
+// A group has at most one call running at a time. callId -> { groupId, type,
+// participants: Map(userId -> { username }) }. Only group members who have
+// Beta Features enabled ever get rung or can join — everyone else in the
+// group never hears about the call at all. Calls are full-mesh: every
+// participant holds a direct WebRTC connection to every other participant,
+// with the server only relaying signaling data (groupcall:signal) between
+// specific pairs, the same way call:signal does for DM calls.
+const activeGroupCalls = new Map();
+const groupCallByGroup = new Map(); // groupId -> callId
+const userGroupCallId = new Map(); // userId -> callId (mirrors userCallId, for DM calls)
+
+function endGroupCallForUser(callId, userId, { notifyOthers = true } = {}) {
+  const call = activeGroupCalls.get(callId);
+  if (!call) return;
+  const participant = call.participants.get(userId);
+  call.participants.delete(userId);
+  userGroupCallId.delete(userId);
+  if (notifyOthers && participant) {
+    for (const otherId of call.participants.keys()) {
+      for (const socketId of onlineSockets.get(otherId) || []) {
+        io.to(socketId).emit("groupcall:participant-left", { callId, userId, username: participant.username });
+      }
+    }
+  }
+  if (call.participants.size === 0) {
+    activeGroupCalls.delete(callId);
+    if (groupCallByGroup.get(call.groupId) === callId) groupCallByGroup.delete(call.groupId);
+  }
+}
 
 function endCall(callId, reason) {
   const call = activeCalls.get(callId);
@@ -2561,9 +2596,8 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ---- Beta: DM voice calls ---------------------------------------------------
-  // DM-only by design — there's no group/global equivalent of these events,
-  // so a call can never be started from those threads.
+  // ---- DM voice & video calls ---------------------------------------------------
+  // DM-only by design — group calls use their own groupcall: events below.
   socket.on("call:invite", async ({ to, type } = {}, cb) => {
     if (typeof cb !== "function") return;
     try {
@@ -2574,24 +2608,16 @@ io.on("connection", (socket) => {
       const target = await getUserByUsername(to);
       if (!target) return cb({ error: "No user with that username." });
 
-      // Voice calls are a regular feature now — only video calls are still
-      // gated behind Beta Features, and need both sides opted in.
-      if (callType === "video") {
-        const meRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [userId] });
-        if (!meRow.rows[0]?.beta_features) return cb({ error: "Turn on Beta Features in Settings to make video calls." });
-
-        const targetRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [target.id] });
-        if (!targetRow.rows[0]?.beta_features) {
-          return cb({ error: `${target.username} hasn't turned on Beta Features.` });
-        }
-      }
+      // DM voice and video calls are both regular features now — no Beta
+      // Features gate here. Beta Features now only gates group calls (see
+      // the groupcall: handlers below).
 
       const theirRelationToMe = await getRelation(target.id, userId);
       if (theirRelationToMe === "blocked") return cb({ error: "You can't call this user." });
 
       if (!onlineSockets.has(target.id)) return cb({ error: `${target.username} is offline.` });
-      if (userCallId.has(userId)) return cb({ error: "You're already in a call." });
-      if (userCallId.has(target.id)) return cb({ error: `${target.username} is already in a call.` });
+      if (userCallId.has(userId) || userGroupCallId.has(userId)) return cb({ error: "You're already in a call." });
+      if (userCallId.has(target.id) || userGroupCallId.has(target.id)) return cb({ error: `${target.username} is already in a call.` });
 
       const callId = crypto.randomUUID();
       activeCalls.set(callId, {
@@ -2656,6 +2682,85 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ---- Beta: Group voice & video calls -------------------------------------
+  // groupcall:join both starts a fresh call (if the group doesn't have one
+  // running yet) and joins an already-running one — the client doesn't need
+  // to know which case it is. Only members with Beta Features on can ever
+  // call this successfully, and only members with it on get rung.
+  socket.on("groupcall:join", async ({ groupId, type } = {}, cb) => {
+    if (typeof cb !== "function") return;
+    try {
+      const gId = Number(groupId);
+      if (!Number.isInteger(gId)) return cb({ error: "Invalid group." });
+      if (!(await isGroupMember(gId, userId))) return cb({ error: "Group not found." });
+
+      const meRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [userId] });
+      if (!meRow.rows[0]?.beta_features) return cb({ error: "Turn on Beta Features in Settings to use group calls." });
+
+      if (userCallId.has(userId) || userGroupCallId.has(userId)) return cb({ error: "You're already in a call." });
+
+      let callId = groupCallByGroup.get(gId);
+      let call = callId ? activeGroupCalls.get(callId) : null;
+
+      if (!call) {
+        // Starting a fresh call for this group.
+        const callType = type === "video" ? "video" : "voice";
+        callId = crypto.randomUUID();
+        call = { groupId: gId, type: callType, participants: new Map() };
+        activeGroupCalls.set(callId, call);
+        groupCallByGroup.set(gId, callId);
+
+        // Ring every other member who's online AND has Beta Features on —
+        // nobody else ever hears about this call.
+        const members = await getGroupMembers(gId);
+        for (const member of members) {
+          if (member.id === userId) continue;
+          if (!onlineSockets.has(member.id)) continue;
+          const row = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [member.id] });
+          if (!row.rows[0]?.beta_features) continue;
+          for (const socketId of onlineSockets.get(member.id) || []) {
+            io.to(socketId).emit("groupcall:incoming", { callId, groupId: gId, from: username, type: call.type });
+          }
+        }
+      }
+
+      const existingParticipants = [...call.participants.entries()].map(([id, p]) => ({ userId: id, username: p.username }));
+      call.participants.set(userId, { username });
+      userGroupCallId.set(userId, callId);
+
+      // Every existing participant learns a new peer has joined so they can
+      // open a WebRTC connection to them; the joiner gets the current
+      // roster back directly so it can do the same from its side.
+      for (const [otherId] of call.participants) {
+        if (otherId === userId) continue;
+        for (const socketId of onlineSockets.get(otherId) || []) {
+          io.to(socketId).emit("groupcall:participant-joined", { callId, userId, username });
+        }
+      }
+
+      cb({ ok: true, callId, type: call.type, participants: existingParticipants });
+    } catch (e) {
+      console.error(e);
+      cb({ error: "Couldn't join the call." });
+    }
+  });
+
+  socket.on("groupcall:leave", ({ callId } = {}) => {
+    if (!callId) return;
+    endGroupCallForUser(callId, userId);
+  });
+
+  // Generic relay for WebRTC offer/answer/ICE candidates between two
+  // specific participants of a group call — mirrors call:signal, just
+  // addressed to one target user id instead of "the other side of the DM".
+  socket.on("groupcall:signal", ({ callId, to, data } = {}) => {
+    const call = activeGroupCalls.get(callId);
+    if (!call || !call.participants.has(userId) || !call.participants.has(to)) return;
+    for (const socketId of onlineSockets.get(to) || []) {
+      io.to(socketId).emit("groupcall:signal", { callId, from: userId, fromUsername: username, data });
+    }
+  });
+
   socket.on("disconnect", () => {
     socketFocus.delete(socket.id);
     onlineSockets.get(userId)?.delete(socket.id);
@@ -2666,6 +2771,8 @@ io.on("connection", (socket) => {
       broadcastOnline(username, false);
       const callId = userCallId.get(userId);
       if (callId) endCall(callId, "disconnected");
+      const groupCallId = userGroupCallId.get(userId);
+      if (groupCallId) endGroupCallForUser(groupCallId, userId);
     } else if (!isUserActive(userId)) {
       broadcastPresence(username, false);
     }
