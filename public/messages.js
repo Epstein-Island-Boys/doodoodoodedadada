@@ -2862,6 +2862,7 @@ function setCallControlsMode(mode) {
 function applyCallTypeUI(type) {
   const isVideo = type === "video";
   els.callModal.classList.toggle("is-video", isVideo);
+  els.callOverlay.classList.toggle("is-video-call", isVideo);
   els.callAvatar.classList.toggle("is-hidden", isVideo);
   els.callVideoStage.classList.toggle("is-hidden", !isVideo);
   els.callCameraBtn.classList.toggle("is-hidden", !isVideo);
@@ -2960,6 +2961,8 @@ function teardownCall() {
   els.callRemoteAudio.srcObject = null;
   els.callRemoteVideo.srcObject = null;
   els.callLocalVideo.srcObject = null;
+  els.callOverlay.classList.remove("is-video-call");
+  els.callModal.classList.remove("is-video");
   hideCallOverlay();
   updateCallButtonVisibility();
 }

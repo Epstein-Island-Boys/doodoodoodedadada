@@ -2086,6 +2086,43 @@ img.avatar {
   max-width: 480px;
 }
 
+.call-modal.is-video {
+  max-width: 90%;
+  width: 90%;
+  max-height: 90vh;
+  height: 90vh;
+}
+
+/* Keep the video call sized against the main content area, not the whole
+   viewport, so it never covers the sidebar on desktop. */
+#call-overlay.is-video-call {
+  justify-content: center;
+}
+
+@media (min-width: 721px) {
+  #call-overlay.is-video-call {
+    left: 300px;
+  }
+}
+
+.call-modal.is-video .call-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.call-modal.is-video .call-video-stage {
+  flex: 1;
+  min-height: 0;
+  aspect-ratio: unset;
+  margin-bottom: 8px;
+}
+
+.call-modal.is-video h2 {
+  font-size: 1.1rem;
+}
+
 .call-video-stage {
   position: relative;
   width: 100%;
