@@ -250,6 +250,21 @@ async function initDb() {
   if (!userColumns.includes("is_admin")) {
     await db.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
   }
+  // Beta Features: an opt-in flag a user flips on in Settings. Right now the
+  // only thing gated behind it is DM voice calling — both sides of a DM need
+  // it enabled before the call button shows up (see the call: socket
+  // handlers near the bottom of this file).
+  if (!userColumns.includes("beta_features")) {
+    await db.execute("ALTER TABLE users ADD COLUMN beta_features INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // Group chat picture — same idea as a user's avatar_image_id, just on
+  // group_chats instead of users. Any current member can set it.
+  const groupCols = await db.execute("PRAGMA table_info(group_chats)");
+  const groupChatColumns = groupCols.rows.map((c) => c.name);
+  if (!groupChatColumns.includes("avatar_image_id")) {
+    await db.execute("ALTER TABLE group_chats ADD COLUMN avatar_image_id INTEGER");
+  }
 }
 
 const app = express();
@@ -483,7 +498,7 @@ app.get("/api/me", async (req, res) => {
   if (!req.session.userId) return res.json({ loggedIn: false });
 
   const result = await db.execute({
-    sql: "SELECT username, name_color, avatar_image_id, theme_light_bg, theme_dark_bg, is_admin FROM users WHERE id = ?",
+    sql: "SELECT username, name_color, avatar_image_id, theme_light_bg, theme_dark_bg, is_admin, beta_features FROM users WHERE id = ?",
     args: [req.session.userId],
   });
   const user = result.rows[0];
@@ -497,7 +512,21 @@ app.get("/api/me", async (req, res) => {
     themeLightBg: user.theme_light_bg || null,
     themeDarkBg: user.theme_dark_bg || null,
     isAdmin: Boolean(user.is_admin),
+    betaFeatures: Boolean(user.beta_features),
   });
+});
+
+// ---- Beta Features toggle ----------------------------------------------------
+// Purely opt-in and self-service (unlike admin mode, no password gate) —
+// right now it just unlocks the DM voice call button once both sides of a
+// DM have it turned on.
+app.post("/api/account/beta-features", requireAuth, async (req, res) => {
+  const enabled = Boolean(req.body && req.body.enabled);
+  await db.execute({
+    sql: "UPDATE users SET beta_features = ? WHERE id = ?",
+    args: [enabled ? 1 : 0, req.session.userId],
+  });
+  res.json({ ok: true, betaFeatures: enabled });
 });
 
 // ---- Auth guard for future protected routes --------------------------------
@@ -513,10 +542,12 @@ function requireAuth(req, res, next) {
 app.get("/api/users/:username", requireAuth, async (req, res) => {
   const user = await getUserByUsername(req.params.username);
   if (!user) return res.status(404).json({ error: "No user with that username." });
+  const betaResult = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [user.id] });
   res.json({
     username: user.username,
     nameColor: user.name_color || null,
     avatarUrl: avatarUrlFor(user.avatar_image_id),
+    betaFeatures: Boolean(betaResult.rows[0]?.beta_features),
   });
 });
 
@@ -1271,6 +1302,11 @@ async function getGroupMembers(groupId) {
   return r.rows;
 }
 
+async function getGroupAvatarUrl(groupId) {
+  const r = await db.execute({ sql: "SELECT avatar_image_id FROM group_chats WHERE id = ?", args: [groupId] });
+  return avatarUrlFor(r.rows[0]?.avatar_image_id);
+}
+
 function groupMemberSummary(members) {
   return members.map((m) => ({
     username: m.username,
@@ -1369,7 +1405,7 @@ app.post("/api/groups", requireAuth, async (req, res) => {
   }
 
   const members = await getGroupMembers(groupId);
-  const payload = { id: groupId, name: null, members: groupMemberSummary(members) };
+  const payload = { id: groupId, name: null, avatarUrl: null, members: groupMemberSummary(members) };
 
   // Push the new group into everyone else's sidebar live.
   await broadcastToGroup(groupId, "group-updated", payload, myId);
@@ -1383,7 +1419,7 @@ app.post("/api/groups", requireAuth, async (req, res) => {
 app.get("/api/groups", requireAuth, async (req, res) => {
   const myId = req.session.userId;
   const rowsResult = await db.execute({
-    sql: `SELECT gc.id, gc.name, gm.last_read_at
+    sql: `SELECT gc.id, gc.name, gc.avatar_image_id, gm.last_read_at
           FROM group_chats gc JOIN group_members gm ON gm.group_id = gc.id
           WHERE gm.user_id = ?`,
     args: [myId],
@@ -1406,6 +1442,7 @@ app.get("/api/groups", requireAuth, async (req, res) => {
     groups.push({
       id: row.id,
       name: row.name || null,
+      avatarUrl: avatarUrlFor(row.avatar_image_id),
       members: groupMemberSummary(members),
       lastMessage: last ? { body: last.body, type: last.type, created_at: last.created_at } : null,
       unread: Number(unreadResult.rows[0]?.c || 0),
@@ -1419,11 +1456,11 @@ app.get("/api/groups", requireAuth, async (req, res) => {
 app.get("/api/groups/:id", requireAuth, async (req, res) => {
   const groupId = Number(req.params.id);
   if (!(await isGroupMember(groupId, req.session.userId))) return res.status(404).json({ error: "Group not found." });
-  const gResult = await db.execute({ sql: "SELECT id, name FROM group_chats WHERE id = ?", args: [groupId] });
+  const gResult = await db.execute({ sql: "SELECT id, name, avatar_image_id FROM group_chats WHERE id = ?", args: [groupId] });
   const g = gResult.rows[0];
   if (!g) return res.status(404).json({ error: "Group not found." });
   const members = await getGroupMembers(groupId);
-  res.json({ id: g.id, name: g.name || null, members: groupMemberSummary(members) });
+  res.json({ id: g.id, name: g.name || null, avatarUrl: avatarUrlFor(g.avatar_image_id), members: groupMemberSummary(members) });
 });
 
 // ---- Rename a group -----------------------------------------------------------
@@ -1440,7 +1477,8 @@ app.patch("/api/groups/:id", requireAuth, async (req, res) => {
   await db.execute({ sql: "UPDATE group_chats SET name = ? WHERE id = ?", args: [name, groupId] });
 
   const members = await getGroupMembers(groupId);
-  const payload = { id: groupId, name: name || null, members: groupMemberSummary(members) };
+  const avatarUrl = await getGroupAvatarUrl(groupId);
+  const payload = { id: groupId, name: name || null, avatarUrl, members: groupMemberSummary(members) };
   await broadcastToGroup(groupId, "group-updated", payload);
   await broadcastGroupSystemMessage(
     groupId,
@@ -1490,12 +1528,66 @@ app.post("/api/groups/:id/members", requireAuth, async (req, res) => {
   }
 
   const members = await getGroupMembers(groupId);
-  const gResult = await db.execute({ sql: "SELECT name FROM group_chats WHERE id = ?", args: [groupId] });
-  const payload = { id: groupId, name: gResult.rows[0]?.name || null, members: groupMemberSummary(members) };
+  const gResult = await db.execute({ sql: "SELECT name, avatar_image_id FROM group_chats WHERE id = ?", args: [groupId] });
+  const payload = {
+    id: groupId,
+    name: gResult.rows[0]?.name || null,
+    avatarUrl: avatarUrlFor(gResult.rows[0]?.avatar_image_id),
+    members: groupMemberSummary(members),
+  };
   await broadcastToGroup(groupId, "group-updated", payload);
   await broadcastGroupSystemMessage(groupId, myId, `${req.session.username} added ${added.join(", ")} to the group.`);
 
   res.json({ ok: true, added, group: payload });
+});
+
+// ---- Change or remove a group's picture ----------------------------------------
+// Any current member can set it — same permission level as renaming.
+app.post("/api/groups/:id/avatar", requireAuth, (req, res) => {
+  upload.single("avatar")(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || "Upload failed." });
+    if (!req.file) return res.status(400).json({ error: "No image provided." });
+
+    try {
+      const groupId = Number(req.params.id);
+      const myId = req.session.userId;
+      if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+      const imageInfo = await db.execute({
+        sql: "INSERT INTO images (mime_type, data, uploaded_by) VALUES (?, ?, ?)",
+        args: [req.file.mimetype, req.file.buffer, myId],
+      });
+      const imageId = insertedId(imageInfo);
+      await db.execute({ sql: "UPDATE group_chats SET avatar_image_id = ? WHERE id = ?", args: [imageId, groupId] });
+
+      const members = await getGroupMembers(groupId);
+      const gResult = await db.execute({ sql: "SELECT name FROM group_chats WHERE id = ?", args: [groupId] });
+      const payload = {
+        id: groupId,
+        name: gResult.rows[0]?.name || null,
+        avatarUrl: avatarUrlFor(imageId),
+        members: groupMemberSummary(members),
+      };
+      await broadcastToGroup(groupId, "group-updated", payload);
+      res.json({ ok: true, avatarUrl: payload.avatarUrl, group: payload });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Upload failed." });
+    }
+  });
+});
+
+app.delete("/api/groups/:id/avatar", requireAuth, async (req, res) => {
+  const groupId = Number(req.params.id);
+  const myId = req.session.userId;
+  if (!(await isGroupMember(groupId, myId))) return res.status(404).json({ error: "Group not found." });
+
+  await db.execute({ sql: "UPDATE group_chats SET avatar_image_id = NULL WHERE id = ?", args: [groupId] });
+  const members = await getGroupMembers(groupId);
+  const gResult = await db.execute({ sql: "SELECT name FROM group_chats WHERE id = ?", args: [groupId] });
+  const payload = { id: groupId, name: gResult.rows[0]?.name || null, avatarUrl: null, members: groupMemberSummary(members) };
+  await broadcastToGroup(groupId, "group-updated", payload);
+  res.json({ ok: true, group: payload });
 });
 
 // ---- Leave a group --------------------------------------------------------------
@@ -2358,6 +2450,27 @@ const onlineSockets = new Map();
 // without a DB round-trip. Populated/cleared alongside onlineSockets.
 const onlineUserNames = new Map();
 
+// ---- Beta: DM voice calls ----------------------------------------------------
+// callId -> { callerId, callerUsername, calleeId, calleeUsername, status }
+// status is "ringing" until the callee accepts, then "active" until either
+// side ends it. userId -> callId lets us quickly tell if someone's already
+// on/ringing a call, and clean things up if their socket drops mid-call.
+const activeCalls = new Map();
+const userCallId = new Map();
+
+function endCall(callId, reason) {
+  const call = activeCalls.get(callId);
+  if (!call) return;
+  activeCalls.delete(callId);
+  userCallId.delete(call.callerId);
+  userCallId.delete(call.calleeId);
+  for (const uid of [call.callerId, call.calleeId]) {
+    for (const socketId of onlineSockets.get(uid) || []) {
+      io.to(socketId).emit("call:ended", { callId, reason });
+    }
+  }
+}
+
 // socketId -> whether that particular tab currently has focus. A user
 // counts as "actively looking at the tab" (the green presence dot) if ANY
 // of their open sockets is focused. This is separate from "online" (merely
@@ -2448,6 +2561,95 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ---- Beta: DM voice calls ---------------------------------------------------
+  // DM-only by design — there's no group/global equivalent of these events,
+  // so a call can never be started from those threads.
+  socket.on("call:invite", async ({ to }, cb) => {
+    if (typeof cb !== "function") return;
+    try {
+      if (typeof to !== "string" || !to.trim()) return cb({ error: "Invalid request." });
+      if (usernameLower(to) === usernameLower(username)) return cb({ error: "You can't call yourself." });
+
+      const target = await getUserByUsername(to);
+      if (!target) return cb({ error: "No user with that username." });
+
+      const meRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [userId] });
+      if (!meRow.rows[0]?.beta_features) return cb({ error: "Turn on Beta Features in Settings to make calls." });
+
+      const targetRow = await db.execute({ sql: "SELECT beta_features FROM users WHERE id = ?", args: [target.id] });
+      if (!targetRow.rows[0]?.beta_features) {
+        return cb({ error: `${target.username} hasn't turned on Beta Features.` });
+      }
+
+      const theirRelationToMe = await getRelation(target.id, userId);
+      if (theirRelationToMe === "blocked") return cb({ error: "You can't call this user." });
+
+      if (!onlineSockets.has(target.id)) return cb({ error: `${target.username} is offline.` });
+      if (userCallId.has(userId)) return cb({ error: "You're already in a call." });
+      if (userCallId.has(target.id)) return cb({ error: `${target.username} is already in a call.` });
+
+      const callId = crypto.randomUUID();
+      activeCalls.set(callId, {
+        callerId: userId,
+        callerUsername: username,
+        calleeId: target.id,
+        calleeUsername: target.username,
+        status: "ringing",
+      });
+      userCallId.set(userId, callId);
+      userCallId.set(target.id, callId);
+
+      for (const socketId of onlineSockets.get(target.id) || []) {
+        io.to(socketId).emit("call:incoming", { callId, from: username });
+      }
+
+      // Missed-call timeout — if nobody answers, tear it down so both sides
+      // free up and can call/be called again.
+      setTimeout(() => {
+        const call = activeCalls.get(callId);
+        if (call && call.status === "ringing") endCall(callId, "missed");
+      }, 45000);
+
+      cb({ ok: true, callId });
+    } catch (e) {
+      console.error(e);
+      cb({ error: "Call failed to start." });
+    }
+  });
+
+  socket.on("call:accept", ({ callId }, cb) => {
+    const call = activeCalls.get(callId);
+    if (!call || call.calleeId !== userId) return cb && cb({ error: "Call not found." });
+    call.status = "active";
+    for (const socketId of onlineSockets.get(call.callerId) || []) {
+      io.to(socketId).emit("call:accepted", { callId });
+    }
+    cb && cb({ ok: true });
+  });
+
+  socket.on("call:decline", ({ callId } = {}) => {
+    const call = activeCalls.get(callId);
+    if (!call || call.calleeId !== userId) return;
+    endCall(callId, "declined");
+  });
+
+  socket.on("call:end", ({ callId } = {}) => {
+    const call = activeCalls.get(callId);
+    if (!call || (call.callerId !== userId && call.calleeId !== userId)) return;
+    endCall(callId, "ended");
+  });
+
+  // Generic relay for WebRTC offer/answer/ICE candidates — the server never
+  // looks inside `data`, it just forwards it to the other side of the call.
+  socket.on("call:signal", ({ callId, data } = {}) => {
+    const call = activeCalls.get(callId);
+    if (!call || (call.callerId !== userId && call.calleeId !== userId)) return;
+    const otherId = call.callerId === userId ? call.calleeId : call.callerId;
+    for (const socketId of onlineSockets.get(otherId) || []) {
+      io.to(socketId).emit("call:signal", { callId, data });
+    }
+  });
+
   socket.on("disconnect", () => {
     socketFocus.delete(socket.id);
     onlineSockets.get(userId)?.delete(socket.id);
@@ -2456,6 +2658,8 @@ io.on("connection", (socket) => {
       onlineUserNames.delete(userId);
       broadcastPresence(username, false);
       broadcastOnline(username, false);
+      const callId = userCallId.get(userId);
+      if (callId) endCall(callId, "disconnected");
     } else if (!isUserActive(userId)) {
       broadcastPresence(username, false);
     }

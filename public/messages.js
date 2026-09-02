@@ -222,8 +222,10 @@ const els = {
   menuDeleteBtn: document.getElementById("conv-menu-delete"),
   groupMenu: document.getElementById("group-menu"),
   groupMenuRename: document.getElementById("group-menu-rename"),
+  groupMenuPicture: document.getElementById("group-menu-picture"),
   groupMenuAdd: document.getElementById("group-menu-add"),
   groupMenuLeave: document.getElementById("group-menu-leave"),
+  groupAvatarInput: document.getElementById("group-avatar-input"),
   replyBar: document.getElementById("reply-bar"),
   replyBarName: document.getElementById("reply-bar-name"),
   replyBarPreview: document.getElementById("reply-bar-preview"),
@@ -264,8 +266,31 @@ const els = {
   adminModePassword: document.getElementById("admin-mode-password"),
   adminModeError: document.getElementById("admin-mode-error"),
   adminModeStatus: document.getElementById("admin-mode-status"),
+  betaFeaturesToggle: document.getElementById("beta-features-toggle"),
+  betaFeaturesStatus: document.getElementById("beta-features-status"),
+  betaFeaturesError: document.getElementById("beta-features-error"),
   relationsList: document.getElementById("relations-list"),
   logoutBtn: document.getElementById("logout-btn"),
+
+  callStartBtn: document.getElementById("call-start-btn"),
+  callOverlay: document.getElementById("call-overlay"),
+  callModal: document.getElementById("call-modal"),
+  callAvatar: document.getElementById("call-avatar"),
+  callAvatarInitial: document.getElementById("call-avatar-initial"),
+  callAvatarImg: document.getElementById("call-avatar-img"),
+  callPeerName: document.getElementById("call-peer-name"),
+  callStatus: document.getElementById("call-status"),
+  callError: document.getElementById("call-error"),
+  callRemoteAudio: document.getElementById("call-remote-audio"),
+  callControlsOutgoing: document.getElementById("call-controls-outgoing"),
+  callControlsIncoming: document.getElementById("call-controls-incoming"),
+  callControlsActive: document.getElementById("call-controls-active"),
+  callCancelBtn: document.getElementById("call-cancel-btn"),
+  callDeclineBtn: document.getElementById("call-decline-btn"),
+  callAcceptBtn: document.getElementById("call-accept-btn"),
+  callHangupBtn: document.getElementById("call-hangup-btn"),
+  callMuteBtn: document.getElementById("call-mute-btn"),
+  onlinePopoverTitle: document.getElementById("online-popover-title"),
 
   plusBtn: document.getElementById("plus-btn"),
   plusMenu: document.getElementById("plus-menu"),
@@ -365,21 +390,41 @@ function avatarHtml(username, avatarUrl, extraClass = "", showPresence = false) 
   return `<span class="avatar-wrap">${inner}${dot}</span>`;
 }
 
-// ---- Online-users indicator (Global Chat) --------------------------------------
+// ---- Online-users indicator (Global Chat + group chats) ------------------------
+// Group chats reuse this exact same header badge/popover as Global Chat —
+// just filtered down to that group's members instead of everyone online.
+function currentGroupOnlineMembers() {
+  if (!activeConversation || activeConversation.type !== "group") return null;
+  const group = groups.find((g) => g.id === activeConversation.id);
+  if (!group) return null;
+  const memberLower = new Set((group.members || []).map((m) => m.username.toLowerCase()));
+  return [...onlineUsers.entries()].filter(([key]) => memberLower.has(key)).map(([, name]) => name);
+}
+
 function renderOnlineBadges() {
   const count = onlineUsers.size;
   if (els.globalOnlineCount) els.globalOnlineCount.textContent = String(count);
-  if (els.globalOnlineCountHeader) els.globalOnlineCountHeader.textContent = String(count);
   const isGlobalOpen = activeConversation && activeConversation.type === "global";
-  els.globalOnlineBadgeHeader?.classList.toggle("is-hidden", !isGlobalOpen);
+  const groupOnline = currentGroupOnlineMembers();
+  const isGroupOpen = groupOnline !== null;
+  if (els.globalOnlineCountHeader) {
+    els.globalOnlineCountHeader.textContent = String(isGroupOpen ? groupOnline.length : count);
+  }
+  if (els.onlinePopoverTitle) {
+    els.onlinePopoverTitle.textContent = isGroupOpen ? "Online in this group" : "Online now";
+  }
+  els.globalOnlineBadgeHeader?.classList.toggle("is-hidden", !(isGlobalOpen || isGroupOpen));
   if (!els.onlinePopover.classList.contains("is-hidden")) renderOnlinePopoverList();
 }
 
 function renderOnlinePopoverList() {
   if (!els.onlinePopoverList) return;
-  const names = [...onlineUsers.values()].sort((a, b) => a.localeCompare(b));
+  const groupOnline = currentGroupOnlineMembers();
+  const names = (groupOnline !== null ? groupOnline : [...onlineUsers.values()]).sort((a, b) => a.localeCompare(b));
   if (names.length === 0) {
-    els.onlinePopoverList.innerHTML = `<p class="online-popover-item">Nobody else is online right now.</p>`;
+    els.onlinePopoverList.innerHTML = `<p class="online-popover-item">${
+      groupOnline !== null ? "Nobody else in this group is online right now." : "Nobody else is online right now."
+    }</p>`;
     return;
   }
   els.onlinePopoverList.innerHTML = names
@@ -431,10 +476,11 @@ async function loadGroups() {
 function upsertGroup(partial) {
   let g = groups.find((x) => x.id === partial.id);
   if (!g) {
-    g = { id: partial.id, name: partial.name || null, members: partial.members || [], lastMessage: null, unread: 0 };
+    g = { id: partial.id, name: partial.name || null, avatarUrl: partial.avatarUrl || null, members: partial.members || [], lastMessage: null, unread: 0 };
     groups.push(g);
   } else {
     g.name = partial.name || null;
+    if ("avatarUrl" in partial) g.avatarUrl = partial.avatarUrl || null;
     if (partial.members) g.members = partial.members;
   }
   return g;
@@ -479,6 +525,12 @@ function renderDmItem(c) {
   </div>`;
 }
 
+function groupIconHtml(g) {
+  return g.avatarUrl
+    ? `<span class="group-chat-icon" aria-hidden="true"><img src="${escapeHtml(g.avatarUrl)}" alt="" /></span>`
+    : `<span class="group-chat-icon" aria-hidden="true">👥</span>`;
+}
+
 function renderGroupItem(g) {
   const active = isActiveGroup(g.id) ? "active" : "";
   const unread = g.unread || 0;
@@ -494,7 +546,7 @@ function renderGroupItem(g) {
   return `
   <div class="conversation-item ${active} ${hasUnread ? "has-unread" : ""}">
     <button class="conv-open" data-group-id="${g.id}">
-      <span class="group-chat-icon" aria-hidden="true">👥</span>
+      ${groupIconHtml(g)}
       <div class="conv-open-text">
         <div class="conv-name">${escapeHtml(name)} ${hasUnread ? `<span class="unread-dot" title="Unread"></span>` : ""}</div>
         <div class="conv-preview">${escapeHtml(previewText)}</div>
@@ -602,6 +654,7 @@ async function setRelation(target, relation) {
   }
   renderConversationList();
   renderRelationsList();
+  updateCallButtonVisibility();
 }
 
 els.menuMuteBtn.addEventListener("click", async () => {
@@ -672,6 +725,42 @@ els.groupMenuRename?.addEventListener("click", async () => {
   try {
     const res = await apiPatch(`/api/groups/${groupId}`, { name: name.trim() });
     if (group) group.name = res.name;
+    renderConversationList();
+    if (isActiveGroup(groupId)) updateGroupThreadTitle(groupId);
+  } catch (err) {
+    window.alert(err.message);
+  }
+});
+
+ els.groupMenuPicture?.addEventListener("click", () => {
+  const groupId = Number(els.groupMenu.dataset.target);
+  closeGroupMenu();
+  if (!groupId) return;
+  els.groupAvatarInput.dataset.groupId = String(groupId);
+  els.groupAvatarInput.click();
+});
+
+els.groupAvatarInput?.addEventListener("change", async () => {
+  const file = els.groupAvatarInput.files[0];
+  const groupId = Number(els.groupAvatarInput.dataset.groupId);
+  els.groupAvatarInput.value = "";
+  delete els.groupAvatarInput.dataset.groupId;
+  if (!file || !groupId) return;
+  if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+    window.alert("Only PNG, JPEG, GIF, and WEBP images are supported.");
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    window.alert("Images are limited to 5MB.");
+    return;
+  }
+  const formData = new FormData();
+  formData.append("avatar", file);
+  try {
+    const res = await fetch(`/api/groups/${groupId}/avatar`, { method: "POST", credentials: "same-origin", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Upload failed.");
+    upsertGroup(data.group);
     renderConversationList();
     if (isActiveGroup(groupId)) updateGroupThreadTitle(groupId);
   } catch (err) {
@@ -777,6 +866,8 @@ async function openThread(username) {
     dmMeta.hasMoreNewer = false;
   }
   ensurePartnerProfile(username);
+  refreshPartnerBeta(username);
+  updateCallButtonVisibility();
   renderThread();
   els.composerInput.focus();
   markRead(username);
@@ -806,6 +897,7 @@ async function openGlobal() {
   renderConversationList();
   renderTypingIndicator();
   renderOnlineBadges();
+  updateCallButtonVisibility();
 
   const gMeta = metaFor("global", null);
   if (!gMeta.everFetched) {
@@ -836,6 +928,7 @@ async function openGroupThread(groupId) {
   renderConversationList();
   renderTypingIndicator();
   renderOnlineBadges();
+  updateCallButtonVisibility();
   els.onlinePopover.classList.add("is-hidden");
 
   const grMeta = metaFor("group", groupId);
@@ -853,7 +946,13 @@ async function openGroupThread(groupId) {
 
 function updateGroupThreadTitle(groupId) {
   const group = groups.find((g) => g.id === groupId);
-  els.threadTitle.textContent = "👥 " + (group ? groupDisplayName(group) : "Group chat");
+  const name = group ? groupDisplayName(group) : "Group chat";
+  els.threadTitle.innerHTML =
+    group && group.avatarUrl
+      ? `<span class="group-chat-icon" style="width:22px;height:22px;font-size:0.7rem;vertical-align:-5px;margin-right:6px;"><img src="${escapeHtml(
+          group.avatarUrl
+        )}" alt="" /></span>${escapeHtml(name)}`
+      : `👥 ${escapeHtml(name)}`;
 }
 
 async function markGroupRead(groupId) {
@@ -2484,6 +2583,8 @@ function openSettings() {
     ? "Admin mode is enabled permanently on this account."
     : "Admin mode lets you edit and delete anyone's messages in Global Chat.";
   if (els.adminModeForm) els.adminModeForm.classList.toggle("is-hidden", Boolean(me?.isAdmin));
+  if (els.betaFeaturesToggle) els.betaFeaturesToggle.checked = Boolean(me?.betaFeatures);
+  if (els.betaFeaturesError) els.betaFeaturesError.textContent = "";
   els.settingsOverlay.classList.remove("is-hidden");
 }
 
@@ -2496,6 +2597,19 @@ els.settingsBtnThread?.addEventListener("click", openSettings);
 els.settingsClose.addEventListener("click", closeSettings);
 els.settingsOverlay.addEventListener("click", (e) => {
   if (e.target === els.settingsOverlay) closeSettings();
+});
+
+els.betaFeaturesToggle?.addEventListener("change", async () => {
+  const enabled = els.betaFeaturesToggle.checked;
+  els.betaFeaturesError.textContent = "";
+  try {
+    const res = await apiPost("/api/account/beta-features", { enabled });
+    me.betaFeatures = Boolean(res.betaFeatures);
+    updateCallButtonVisibility();
+  } catch (err) {
+    els.betaFeaturesToggle.checked = !enabled; // revert on failure
+    els.betaFeaturesError.textContent = err.message;
+  }
 });
 
 els.adminModeForm?.addEventListener("submit", async (e) => {
@@ -2700,6 +2814,264 @@ window.addEventListener("focus", reportFocusState);
 window.addEventListener("blur", reportFocusState);
 document.addEventListener("visibilitychange", reportFocusState);
 
+// ---- Beta: DM voice calls -------------------------------------------------------
+// WebRTC audio calls, gated behind Beta Features and DMs only (see the
+// call:* socket handlers in server.js — there's no group/global equivalent).
+const RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
+let currentCall = null; // { role, peerUsername, callId, pc, localStream, iceQueue } | null
+const partnerBeta = new Map(); // username(lower) -> boolean, refreshed each time a DM thread opens
+
+function showCallOverlay() {
+  els.callOverlay.classList.remove("is-hidden");
+}
+function hideCallOverlay() {
+  els.callOverlay.classList.add("is-hidden");
+}
+
+function setCallPeerDisplay(username) {
+  els.callPeerName.textContent = username;
+  const profile = partnerProfiles.get(username.toLowerCase());
+  if (profile && profile.avatarUrl) {
+    els.callAvatarImg.src = profile.avatarUrl;
+    els.callAvatarImg.classList.remove("is-hidden");
+    els.callAvatarInitial.classList.add("is-hidden");
+  } else {
+    els.callAvatarImg.classList.add("is-hidden");
+    els.callAvatarInitial.classList.remove("is-hidden");
+    els.callAvatarInitial.textContent = initialFor(username);
+  }
+}
+
+function setCallControlsMode(mode) {
+  els.callControlsOutgoing.classList.toggle("is-hidden", mode !== "outgoing");
+  els.callControlsIncoming.classList.toggle("is-hidden", mode !== "incoming");
+  els.callControlsActive.classList.toggle("is-hidden", mode !== "active");
+}
+
+function resetCallModal() {
+  els.callError.textContent = "";
+  els.callMuteBtn.classList.remove("is-muted");
+  els.callMuteBtn.textContent = "🎤";
+}
+
+async function flushIceQueue() {
+  if (!currentCall || !currentCall.pc || !currentCall.iceQueue || !currentCall.iceQueue.length) return;
+  const queue = currentCall.iceQueue;
+  currentCall.iceQueue = [];
+  for (const candidate of queue) {
+    try {
+      await currentCall.pc.addIceCandidate(candidate);
+    } catch {
+      // Benign — candidate arrived too late to matter.
+    }
+  }
+}
+
+async function setupPeerConnection() {
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  currentCall.pc = pc;
+  currentCall.iceQueue = currentCall.iceQueue || [];
+  currentCall.localStream.getTracks().forEach((track) => pc.addTrack(track, currentCall.localStream));
+  pc.onicecandidate = (e) => {
+    if (e.candidate && currentCall) {
+      socketRef.emit("call:signal", { callId: currentCall.callId, data: { type: "ice-candidate", candidate: e.candidate } });
+    }
+  };
+  pc.ontrack = (e) => {
+    els.callRemoteAudio.srcObject = e.streams[0];
+  };
+  pc.onconnectionstatechange = () => {
+    if (!currentCall || pc !== currentCall.pc) return;
+    if (pc.connectionState === "connected") {
+      els.callStatus.textContent = "Connected";
+    } else if (pc.connectionState === "failed") {
+      els.callStatus.textContent = "Connection failed.";
+      hangupCall();
+    }
+  };
+  await flushIceQueue();
+  return pc;
+}
+
+function teardownCall() {
+  if (currentCall) {
+    if (currentCall.pc) {
+      currentCall.pc.onicecandidate = null;
+      currentCall.pc.ontrack = null;
+      currentCall.pc.onconnectionstatechange = null;
+      currentCall.pc.close();
+    }
+    if (currentCall.localStream) currentCall.localStream.getTracks().forEach((t) => t.stop());
+  }
+  currentCall = null;
+  els.callRemoteAudio.srcObject = null;
+  hideCallOverlay();
+  updateCallButtonVisibility();
+}
+
+async function startCall(peerUsername) {
+  if (currentCall) return;
+  currentCall = { role: "caller", peerUsername, callId: null, pc: null, localStream: null, iceQueue: [] };
+  resetCallModal();
+  setCallPeerDisplay(peerUsername);
+  els.callStatus.textContent = "Calling…";
+  setCallControlsMode("outgoing");
+  showCallOverlay();
+  updateCallButtonVisibility();
+
+  socketRef.emit("call:invite", { to: peerUsername }, async (res) => {
+    if (!currentCall || currentCall.peerUsername !== peerUsername || currentCall.role !== "caller") return;
+    if (!res || res.error) {
+      els.callStatus.textContent = (res && res.error) || "Call failed to start.";
+      setTimeout(() => teardownCall(), 1500);
+      return;
+    }
+    currentCall.callId = res.callId;
+    try {
+      currentCall.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      els.callStatus.textContent = "Microphone access was denied.";
+      hangupCall();
+    }
+  });
+}
+
+function hangupCall() {
+  if (!currentCall) return;
+  if (currentCall.callId) socketRef.emit("call:end", { callId: currentCall.callId });
+  teardownCall();
+}
+
+function declineCall() {
+  if (!currentCall) return;
+  if (currentCall.callId) socketRef.emit("call:decline", { callId: currentCall.callId });
+  teardownCall();
+}
+
+async function acceptCall() {
+  if (!currentCall || currentCall.role !== "callee") return;
+  els.callStatus.textContent = "Connecting…";
+  setCallControlsMode("active");
+  try {
+    currentCall.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    els.callError.textContent = "Microphone access was denied.";
+    declineCall();
+    return;
+  }
+  await setupPeerConnection();
+  socketRef.emit("call:accept", { callId: currentCall.callId }, (res) => {
+    if (!res || res.error) {
+      els.callError.textContent = (res && res.error) || "Call failed.";
+      teardownCall();
+    }
+  });
+}
+
+function toggleMute() {
+  if (!currentCall || !currentCall.localStream) return;
+  const track = currentCall.localStream.getAudioTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  els.callMuteBtn.classList.toggle("is-muted", !track.enabled);
+  els.callMuteBtn.textContent = track.enabled ? "🎤" : "🔇";
+}
+
+function handleCallIncoming({ callId, from }) {
+  if (currentCall) {
+    // Already on/ringing another call — auto-decline, like a busy signal.
+    socketRef.emit("call:decline", { callId });
+    return;
+  }
+  currentCall = { role: "callee", peerUsername: from, callId, pc: null, localStream: null, iceQueue: [] };
+  resetCallModal();
+  setCallPeerDisplay(from);
+  els.callStatus.textContent = "Incoming call…";
+  setCallControlsMode("incoming");
+  showCallOverlay();
+  updateCallButtonVisibility();
+}
+
+async function handleCallAccepted({ callId }) {
+  if (!currentCall || currentCall.callId !== callId || currentCall.role !== "caller") return;
+  els.callStatus.textContent = "Connecting…";
+  setCallControlsMode("active");
+  await setupPeerConnection();
+  const offer = await currentCall.pc.createOffer();
+  await currentCall.pc.setLocalDescription(offer);
+  socketRef.emit("call:signal", { callId, data: { type: "offer", sdp: currentCall.pc.localDescription } });
+}
+
+async function handleCallSignal({ callId, data }) {
+  if (!currentCall || currentCall.callId !== callId || !data) return;
+  if (data.type === "offer") {
+    if (!currentCall.pc) await setupPeerConnection();
+    await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    await flushIceQueue();
+    const answer = await currentCall.pc.createAnswer();
+    await currentCall.pc.setLocalDescription(answer);
+    socketRef.emit("call:signal", { callId, data: { type: "answer", sdp: currentCall.pc.localDescription } });
+  } else if (data.type === "answer") {
+    if (currentCall.pc) {
+      await currentCall.pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      await flushIceQueue();
+    }
+  } else if (data.type === "ice-candidate") {
+    if (currentCall.pc && currentCall.pc.remoteDescription && currentCall.pc.remoteDescription.type) {
+      try {
+        await currentCall.pc.addIceCandidate(data.candidate);
+      } catch {
+        // Benign.
+      }
+    } else {
+      currentCall.iceQueue = currentCall.iceQueue || [];
+      currentCall.iceQueue.push(data.candidate);
+    }
+  }
+}
+
+function handleCallEnded({ callId, reason }) {
+  if (!currentCall || currentCall.callId !== callId) return;
+  const messages = { declined: "Call declined.", missed: "No answer.", disconnected: "Call disconnected.", ended: "Call ended." };
+  els.callStatus.textContent = messages[reason] || "Call ended.";
+  setTimeout(() => teardownCall(), reason === "declined" || reason === "missed" ? 1200 : 0);
+}
+
+function updateCallButtonVisibility() {
+  if (!els.callStartBtn) return;
+  const isDm = activeConversation && activeConversation.type === "dm";
+  if (!isDm) {
+    els.callStartBtn.classList.add("is-hidden");
+    return;
+  }
+  const partnerHasBeta = partnerBeta.get(activeConversation.username.toLowerCase());
+  const blocked = blockedUsers.has(activeConversation.username);
+  const show = Boolean(me?.betaFeatures) && partnerHasBeta === true && !blocked && !currentCall;
+  els.callStartBtn.classList.toggle("is-hidden", !show);
+}
+
+async function refreshPartnerBeta(username) {
+  try {
+    const profile = await apiGet(`/api/users/${encodeURIComponent(username)}`);
+    if (profile.error) return;
+    partnerBeta.set(username.toLowerCase(), Boolean(profile.betaFeatures));
+    partnerProfiles.set(username.toLowerCase(), { avatarUrl: profile.avatarUrl, nameColor: profile.nameColor });
+    if (isActiveDm(username)) updateCallButtonVisibility();
+  } catch {
+    // Non-critical — the call button just won't show until this succeeds.
+  }
+}
+
+els.callStartBtn?.addEventListener("click", () => {
+  if (!activeConversation || activeConversation.type !== "dm") return;
+  startCall(activeConversation.username);
+});
+els.callCancelBtn?.addEventListener("click", hangupCall);
+els.callHangupBtn?.addEventListener("click", hangupCall);
+els.callDeclineBtn?.addEventListener("click", declineCall);
+els.callAcceptBtn?.addEventListener("click", acceptCall);
+els.callMuteBtn?.addEventListener("click", toggleMute);
+
 // ---- Boot --------------------------------------------------------------------
 (async () => {
   me = await apiGet("/api/me");
@@ -2825,7 +3197,10 @@ document.addEventListener("visibilitychange", reportFocusState);
   socket.on("group-updated", (payload) => {
     upsertGroup(payload);
     renderConversationList();
-    if (isActiveGroup(payload.id)) updateGroupThreadTitle(payload.id);
+    if (isActiveGroup(payload.id)) {
+      updateGroupThreadTitle(payload.id);
+      renderOnlineBadges();
+    }
   });
 
   socket.on("group-member-left", ({ id, members }) => {
@@ -2833,7 +3208,10 @@ document.addEventListener("visibilitychange", reportFocusState);
     if (g) {
       g.members = members;
       renderConversationList();
-      if (isActiveGroup(id)) updateGroupThreadTitle(id);
+      if (isActiveGroup(id)) {
+        updateGroupThreadTitle(id);
+        renderOnlineBadges();
+      }
     }
   });
 
@@ -2861,6 +3239,11 @@ document.addEventListener("visibilitychange", reportFocusState);
     else onlineUsers.delete(key);
     renderOnlineBadges();
   });
+
+  socket.on("call:incoming", handleCallIncoming);
+  socket.on("call:accepted", handleCallAccepted);
+  socket.on("call:signal", handleCallSignal);
+  socket.on("call:ended", handleCallEnded);
 
   // If a DM thread is open when the tab regains focus, treat its messages
   // as read now rather than waiting for the next interaction.

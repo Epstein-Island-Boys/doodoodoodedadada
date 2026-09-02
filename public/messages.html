@@ -75,11 +75,12 @@
             <button type="button" class="online-badge online-badge-header is-hidden" id="global-online-badge-header" aria-haspopup="true">
               <span class="online-badge-dot"></span><span id="global-online-count-header">0</span> online
             </button>
+            <button type="button" class="icon-btn is-hidden" id="call-start-btn" aria-label="Start voice call" title="Voice call">📞</button>
             <button type="button" class="icon-btn" id="settings-btn-thread" aria-label="Settings">⚙️</button>
           </div>
         </div>
         <div class="online-popover is-hidden" id="online-popover">
-          <p class="online-popover-title">Online now</p>
+          <p class="online-popover-title" id="online-popover-title">Online now</p>
           <div id="online-popover-list" class="online-popover-list"></div>
         </div>
         <div class="thread-wrap" id="thread-wrap">
@@ -128,9 +129,11 @@
   <!-- 3-dot menu for a group chat — same slot as the DM mute/block/delete menu. -->
   <div class="context-menu is-hidden" id="group-menu">
     <button type="button" id="group-menu-rename">Rename group</button>
+    <button type="button" id="group-menu-picture">Change picture</button>
     <button type="button" id="group-menu-add">Add people</button>
     <button type="button" id="group-menu-leave" class="context-menu-danger">Leave group</button>
   </div>
+  <input type="file" id="group-avatar-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
 
   <!-- Image lightbox: click any uploaded image to view it full-size. -->
   <div class="lightbox is-hidden" id="lightbox">
@@ -186,6 +189,30 @@
           <button type="button" class="link-btn" id="voice-retake">Discard</button>
           <button type="button" class="btn" id="voice-send">Send</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Voice call modal: outgoing ringing / incoming ringing / active call, all one screen. -->
+  <div class="modal-overlay is-hidden" id="call-overlay">
+    <div class="modal call-modal" id="call-modal" role="dialog" aria-modal="true" aria-label="Voice call">
+      <div class="call-stage">
+        <div class="avatar call-avatar" id="call-avatar"><span id="call-avatar-initial">?</span><img id="call-avatar-img" class="is-hidden" alt="" /></div>
+        <h2 id="call-peer-name">—</h2>
+        <p id="call-status">Calling…</p>
+      </div>
+      <audio id="call-remote-audio" autoplay></audio>
+      <p class="settings-error" id="call-error"></p>
+      <div class="call-controls" id="call-controls-outgoing">
+        <button type="button" class="btn call-btn-danger" id="call-cancel-btn">Cancel</button>
+      </div>
+      <div class="call-controls is-hidden" id="call-controls-incoming">
+        <button type="button" class="btn call-btn-danger" id="call-decline-btn">Decline</button>
+        <button type="button" class="btn call-btn-accept" id="call-accept-btn">Accept</button>
+      </div>
+      <div class="call-controls is-hidden" id="call-controls-active">
+        <button type="button" class="icon-btn" id="call-mute-btn" aria-label="Mute microphone" title="Mute">🎤</button>
+        <button type="button" class="btn call-btn-danger" id="call-hangup-btn">End call</button>
       </div>
     </div>
   </div>
@@ -270,6 +297,16 @@
             <button class="btn" type="submit">Enable</button>
           </form>
           <p class="settings-error" id="admin-mode-error"></p>
+        </section>
+
+        <section class="settings-section">
+          <h3>Beta Features</h3>
+          <p class="settings-hint" id="beta-features-status">Turn on early access features — right now that's voice calls in DMs with other people who also have it enabled.</p>
+          <label class="beta-toggle-row">
+            <input type="checkbox" id="beta-features-toggle" />
+            <span>Enable Beta Features</span>
+          </label>
+          <p class="settings-error" id="beta-features-error"></p>
         </section>
 
         <section class="settings-section">
