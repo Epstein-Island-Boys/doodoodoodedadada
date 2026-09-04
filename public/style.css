@@ -2119,6 +2119,11 @@ img.avatar {
 
 .gif-result {
   position: relative;
+  /* Fixed square slot, reserved before the image ever loads. Grid tracks
+     no longer depend on each thumbnail's natural size, so tiles can't
+     collapse to zero height or jump/overlap one another as more GIFs
+     load in — every tile occupies its final size from the first paint. */
+  aspect-ratio: 1 / 1;
   border-radius: 8px;
   cursor: pointer;
   overflow: hidden;
@@ -2132,14 +2137,14 @@ img.avatar {
   transform: scale(1.02);
 }
 
-/* Full GIF, never cropped — height is whatever the image's own aspect ratio
-   needs, not forced into a fixed box. Tiles in the same grid row line up to
-   the tallest one, which can leave some whitespace next to shorter GIFs,
-   but nothing gets cut off. */
+/* Full GIF, never cropped — object-fit: contain letterboxes the image
+   inside the fixed square tile instead of stretching or cutting it off,
+   so the whole GIF is always visible regardless of its own aspect ratio. */
 .gif-result img {
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: contain;
   pointer-events: none;
 }
 
