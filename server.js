@@ -17,6 +17,12 @@ const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-this-in-production";
 const ADMIN_MODE_PASSWORD = process.env.ADMIN_MODE_PASSWORD || "SussyBaka67";
 
+// TURN relay fallback (Cloudflare Realtime) — optional. Voice/video calls
+// work via STUN-only when these aren't set; TURN just adds a relay path for
+// the connections that can't reach each other directly (strict NATs, etc).
+const TURN_KEY_ID = process.env.TURN_KEY_ID;
+const TURN_API_TOKEN = process.env.TURN_API_TOKEN;
+
 // ---- Database (Turso / libSQL) ---------------------------------------------
 // This used to be a local SQLite file, which is why data disappeared on every
 // redeploy: most hosts (Render, Railway, Fly, Replit, etc.) give your app a
@@ -528,6 +534,40 @@ app.post("/api/account/beta-features", requireAuth, async (req, res) => {
     args: [enabled ? 1 : 0, req.session.userId],
   });
   res.json({ ok: true, betaFeatures: enabled });
+});
+
+// ---- TURN relay credentials --------------------------------------------------
+// Mints short-lived TURN credentials via Cloudflare's Realtime API using our
+// secret API token (server-side only), and hands the client just the
+// temporary username/password pair. Cached in memory so we're not minting a
+// fresh set on every call — they're valid for hours.
+let cachedTurnCreds = null; // { iceServers, expiresAt }
+
+async function getTurnIceServers() {
+  if (!TURN_KEY_ID || !TURN_API_TOKEN) return null; // not configured — client falls back to STUN-only
+  if (cachedTurnCreds && cachedTurnCreds.expiresAt > Date.now()) {
+    return cachedTurnCreds.iceServers;
+  }
+  const ttlSeconds = 6 * 60 * 60; // comfortably longer than any call should run
+  const res = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${TURN_KEY_ID}/credentials/generate-ice-servers`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${TURN_API_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ ttl: ttlSeconds }),
+  });
+  if (!res.ok) throw new Error(`TURN credential request failed: ${res.status}`);
+  const data = await res.json();
+  cachedTurnCreds = { iceServers: data.iceServers, expiresAt: Date.now() + (ttlSeconds - 300) * 1000 };
+  return cachedTurnCreds.iceServers;
+}
+
+app.get("/api/turn-credentials", requireAuth, async (req, res) => {
+  try {
+    const iceServers = await getTurnIceServers();
+    res.json({ iceServers: iceServers || [] });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ iceServers: [] });
+  }
 });
 
 // ---- Auth guard for future protected routes --------------------------------

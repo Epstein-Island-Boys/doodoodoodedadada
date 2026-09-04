@@ -2891,7 +2891,22 @@ document.addEventListener("visibilitychange", reportFocusState);
 // Voice calls are a regular DM feature. Video calls are still Beta-gated and
 // need both sides opted in (see the call:invite handler in server.js — that's
 // the only place the beta check happens; everything below is type-agnostic).
-const RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
+let RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
+
+// Merges in a TURN relay fallback fetched from our own server (which mints
+// short-lived credentials from Cloudflare — see /api/turn-credentials in
+// server.js). Every RTCPeerConnection in this file reads RTC_CONFIG at
+// creation time, so this only needs to run once, early, at boot.
+async function refreshTurnConfig() {
+  try {
+    const data = await apiGet("/api/turn-credentials");
+    if (data.iceServers && data.iceServers.length) {
+      RTC_CONFIG = { iceServers: [...RTC_CONFIG.iceServers, ...data.iceServers] };
+    }
+  } catch {
+    // Non-critical — calls still work via STUN-only when this fails.
+  }
+}
 let currentCall = null; // { role, peerUsername, callId, type, pc, localStream, iceQueue, disconnectTimer } | null
 const partnerBeta = new Map(); // username(lower) -> boolean, refreshed each time a DM thread opens
 
@@ -3618,6 +3633,7 @@ els.groupcallDeclineBtn?.addEventListener("click", hideGroupcallIncoming);
     return;
   }
   els.whoAmI.textContent = "@" + me.username;
+  refreshTurnConfig(); // fire-and-forget — don't block the rest of boot on it
   applyCustomBackground();
   noteKnownUsername(me.username);
 
