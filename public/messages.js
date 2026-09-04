@@ -1991,7 +1991,7 @@ function renderGifTiles(list) {
     const gifUrl = x.gifUrl, previewUrl = x.previewUrl || x.gifUrl, title = x.title || "GIF";
     const isFav = favoriteGifUrls.has(gifUrl);
     return `<div class="gif-result" data-gif-url="${escapeHtml(gifUrl)}" data-preview-url="${escapeHtml(previewUrl)}" data-gif-title="${escapeHtml(title)}">
-      <img src="${escapeHtml(gifDisplayUrl(previewUrl))}" alt="${escapeHtml(title)}" loading="lazy" />
+      <img src="${escapeHtml(gifDisplayUrl(previewUrl))}" alt="${escapeHtml(title)}" />
       <button type="button" class="gif-fav-btn${isFav ? " is-fav" : ""}" data-fav-gif-url="${escapeHtml(gifUrl)}" aria-label="${isFav ? "Remove from favorites" : "Favorite this GIF"}" title="${isFav ? "Remove from favorites" : "Favorite this GIF"}">★</button>
     </div>`;
   }).join("");
