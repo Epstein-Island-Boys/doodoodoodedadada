@@ -331,7 +331,9 @@ function isGenericMimeType(mimeType) {
 
 // Voice messages, recorded in-browser with MediaRecorder. Kept well under
 // the video limit below since these are meant to be quick clips, not long
-// recordings.
+// recordings — the client also soft-caps recording length (see
+// MAX_VOICE_RECORD_MS in messages.js) well under this, so a real recording
+// should essentially never hit this ceiling; it's the backstop.
 //
 // Rather than hardcode an exact allowlist of container/codec strings — which
 // varies by browser and kept rejecting perfectly valid recordings (Firefox,
@@ -343,7 +345,7 @@ function isGenericMimeType(mimeType) {
 // (image/*, video/*, etc).
 const uploadAudio = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 6 * 1024 * 1024 }, // 6MB — see comment above
   fileFilter: (req, file, cb) => {
     if (!baseMimeType(file.mimetype).startsWith("audio/") && !isGenericMimeType(file.mimetype)) {
       return cb(new Error("That audio format isn't supported."));
@@ -367,7 +369,7 @@ const uploadAudio = multer({
 // what came in was generic.
 const uploadVideo = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB
+  limits: { fileSize: 12 * 1024 * 1024 }, // 12MB — see MAX_VIDEO_RECORD_MS in messages.js
 });
 
 // When a file's mimetype came through as one of the generic values above,

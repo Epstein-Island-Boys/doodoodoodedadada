@@ -2029,8 +2029,8 @@ function baseMimeType(mimeType) {
   return String(mimeType || "").split(";")[0].trim().toLowerCase();
 }
 
-const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
-const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
+const MAX_AUDIO_BYTES = 6 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 12 * 1024 * 1024;
 
 // A blob's `type` alone isn't enough — when the file gets downloaded again
 // later (or re-uploaded elsewhere) it needs a real extension, or nothing on
@@ -2234,7 +2234,7 @@ function formatRecTime(ms) {
 
 // Small stopwatch used by both the camera and voice modals to show a
 // pulsing "● 0:0X" indicator while recording.
-function makeRecTimer(indicatorEl, timerEl) {
+function makeRecTimer(indicatorEl, timerEl, maxMs, onMax) {
   let startedAt = 0;
   let interval = null;
   return {
@@ -2243,7 +2243,13 @@ function makeRecTimer(indicatorEl, timerEl) {
       timerEl.textContent = "0:00";
       indicatorEl.classList.remove("is-hidden");
       interval = setInterval(() => {
-        timerEl.textContent = formatRecTime(Date.now() - startedAt);
+        const elapsed = Date.now() - startedAt;
+        timerEl.textContent = formatRecTime(elapsed);
+        // Soft cap on recording length — mainly so a clip never grows large
+        // enough to trip the upload size limit and get silently discarded
+        // after the person's already done recording. That size check
+        // remains the real backstop; this is just better UX.
+        if (maxMs && elapsed >= maxMs && onMax) onMax();
       }, 250);
     },
     stop() {
@@ -2254,8 +2260,15 @@ function makeRecTimer(indicatorEl, timerEl) {
   };
 }
 
-const cameraTimer = makeRecTimer(els.cameraRecIndicator, els.cameraRecTimer);
-const voiceTimer = makeRecTimer(els.voiceRecIndicator, els.voiceRecTimer);
+const MAX_VOICE_RECORD_MS = 3 * 60 * 1000; // 3 minutes
+const MAX_VIDEO_RECORD_MS = 90 * 1000; // 90 seconds
+
+const cameraTimer = makeRecTimer(els.cameraRecIndicator, els.cameraRecTimer, MAX_VIDEO_RECORD_MS, () => {
+  if (cameraRecording) stopVideoRecording();
+});
+const voiceTimer = makeRecTimer(els.voiceRecIndicator, els.voiceRecTimer, MAX_VOICE_RECORD_MS, () => {
+  if (voiceRecording) toggleVoiceRecording();
+});
 
 // ---- Camera modal: take a selfie photo, or record a selfie video ------------
 let cameraStream = null;
