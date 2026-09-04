@@ -2121,7 +2121,6 @@ img.avatar {
   position: relative;
   border-radius: 8px;
   cursor: pointer;
-  aspect-ratio: 1.3;
   overflow: hidden;
   background: var(--surface);
   border: 1px solid transparent;
@@ -2133,11 +2132,14 @@ img.avatar {
   transform: scale(1.02);
 }
 
+/* Full GIF, never cropped — height is whatever the image's own aspect ratio
+   needs, not forced into a fixed box. Tiles in the same grid row line up to
+   the tallest one, which can leave some whitespace next to shorter GIFs,
+   but nothing gets cut off. */
 .gif-result img {
   display: block;
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
   pointer-events: none;
 }
 
@@ -2596,9 +2598,27 @@ img.avatar {
   background: var(--heartwood);
 }
 
-.bubble-group.is-mentioned .bubble:not(.bubble-image):not(.bubble-audio):not(.bubble-video):not(.bubble-embed) {
-  background: rgba(162, 88, 43, 0.16);
-  box-shadow: 0 0 0 1px rgba(162, 88, 43, 0.4) inset;
+/* On a sent (mine) bubble the bubble background is already var(--forest) —
+   the same color .mention uses for its text — so a plain @mention you typed
+   would render as invisible dark-green-on-dark-green. Give mentions inside
+   your own messages a light, high-contrast treatment instead. Mentions of
+   yourself (.is-me) already use the heartwood pill, which reads fine on
+   either bubble color, so this only touches the plain case. */
+.bubble.mine .mention:not(.is-me) {
+  color: var(--paper);
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* Highlighting a message you were pinged in covers the whole message
+   row — avatar/sender name, the bubble itself, and the timestamp — not
+   just the inner bubble shape, so it reads as "this whole message is the
+   one that pinged you" rather than a subtle tint on just the text box. */
+.bubble-group.is-mentioned {
+  background: rgba(162, 88, 43, 0.14);
+  box-shadow: 0 0 0 1px rgba(162, 88, 43, 0.38) inset;
+  border-radius: 14px;
+  padding: 4px 8px;
+  margin: -4px -8px;
 }
 
 /* ---------- Global Chat unread ping ---------- */

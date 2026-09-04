@@ -41,12 +41,13 @@
       <button class="global-chat-item" id="global-chat-btn">
         <span class="global-chat-icon" aria-hidden="true">🌐</span>
         <div class="conv-open-text">
-          <div class="conv-name">Global Chat</div>
+          <div class="conv-name">Global Chat <span class="unread-dot is-hidden" id="global-unread-dot" title="You were pinged"></span></div>
           <div class="conv-preview" id="global-chat-preview">Say hello to everyone.</div>
         </div>
         <span class="online-badge" id="global-online-badge" title="Online now">
           <span class="online-badge-dot"></span><span id="global-online-count">0</span>
         </span>
+        <span class="unread-badge is-hidden" id="global-unread-badge"></span>
       </button>
 
       <form class="new-message" id="new-message-form">

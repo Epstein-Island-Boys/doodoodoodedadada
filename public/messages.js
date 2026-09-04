@@ -35,9 +35,11 @@ const knownUsernames = new Map();
 function noteKnownUsername(username) {
   if (username) knownUsernames.set(username.toLowerCase(), username);
 }
-let globalHasUnreadPing = false; // Global Chat has no general unread system (too high-
-// traffic for "every message" to count) — but a ping should still surface,
-// so this flags "you were pinged in Global Chat since you last opened it."
+// Global Chat has no general unread system (too high-traffic for "every
+// message" to count) — but a ping should still surface as a real count, the
+// same way a DM or group's unread badge does, so this tracks how many pings
+// have landed since Global Chat was last opened.
+let globalUnreadPingCount = 0;
 
 // ---- Windowed history loading ---------------------------------------------------
 // Every thread (a DM, the global room, or a group) keeps at most HISTORY_PAGE_SIZE
@@ -223,6 +225,8 @@ const els = {
   backLink: document.getElementById("back-link"),
   globalBtn: document.getElementById("global-chat-btn"),
   globalPreview: document.getElementById("global-chat-preview"),
+  globalUnreadDot: document.getElementById("global-unread-dot"),
+  globalUnreadBadge: document.getElementById("global-unread-badge"),
   globalOnlineCount: document.getElementById("global-online-count"),
   globalOnlineBadgeHeader: document.getElementById("global-online-badge-header"),
   globalOnlineCountHeader: document.getElementById("global-online-count-header"),
@@ -1026,7 +1030,7 @@ async function openGlobal() {
   clearStagedImage();
   closeEmojiPanel();
   els.globalBtn.classList.add("active");
-  globalHasUnreadPing = false;
+  globalUnreadPingCount = 0;
   renderGlobalUnreadIndicator();
   renderConversationList();
   renderTypingIndicator();
@@ -1322,7 +1326,13 @@ function appendMessage(username, body, mine, type = "text", extra = {}) {
 }
 
 function renderGlobalUnreadIndicator() {
-  els.globalBtn?.classList.toggle("has-unread", globalHasUnreadPing);
+  const hasUnread = globalUnreadPingCount > 0;
+  els.globalBtn?.classList.toggle("has-unread", hasUnread);
+  els.globalUnreadDot?.classList.toggle("is-hidden", !hasUnread);
+  if (els.globalUnreadBadge) {
+    els.globalUnreadBadge.classList.toggle("is-hidden", !hasUnread);
+    els.globalUnreadBadge.textContent = globalUnreadPingCount > 99 ? "99+" : String(globalUnreadPingCount);
+  }
 }
 
 function appendGlobalMessage(sender, body, mine, type = "text", extra = {}) {
@@ -3961,7 +3971,7 @@ els.groupcallDeclineBtn?.addEventListener("click", hideGroupcallIncoming);
     noteKnownUsername(sender);
     const activeAndFocused = activeConversation && activeConversation.type === "global" && document.hasFocus();
     if (!activeAndFocused && type === "text" && isMentionOf(body, me?.username)) {
-      globalHasUnreadPing = true;
+      globalUnreadPingCount++;
       renderGlobalUnreadIndicator();
     }
     appendGlobalMessage(sender, body, false, type || "text", { id, nameColor, avatarUrl, reply });
