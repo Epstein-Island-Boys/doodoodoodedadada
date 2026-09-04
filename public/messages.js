@@ -216,6 +216,8 @@ const els = {
   emojiGrid: document.getElementById("emoji-grid"),
   imageBtn: document.getElementById("image-btn"),
   imageInput: document.getElementById("image-input"), gifBtn: document.getElementById("gif-btn"), gifPanel: document.getElementById("gif-panel"), gifSearch: document.getElementById("gif-search"), gifResults: document.getElementById("gif-results"),
+  gifTabSearch: document.getElementById("gif-tab-search"), gifTabFavorites: document.getElementById("gif-tab-favorites"), gifFavoritesResults: document.getElementById("gif-favorites-results"), gifFavoritesEmpty: document.getElementById("gif-favorites-empty"),
+  stagedAttachmentBar: document.getElementById("staged-attachment-bar"), stagedAttachmentImg: document.getElementById("staged-attachment-img"), stagedAttachmentRemove: document.getElementById("staged-attachment-remove"), composerSendBtn: document.getElementById("composer-send-btn"),
   sidebar: document.getElementById("sidebar"),
   main: document.getElementById("main"),
   backLink: document.getElementById("back-link"),
@@ -865,6 +867,71 @@ function extractYouTubeUrl(t){const m=t.match(/https?:\/\/[^\s]+/i);if(!m)return
 function extractGifUrl(t){for(const raw of t.match(/https?:\/\/[^\s]+/ig)||[]){const u=raw.replace(/[),.!?]+$/g,"");try{const x=new URL(u);if(/\.gif(?:$|[?#])/i.test(x.pathname)||/(^|\.)media\.tenor\.com$/i.test(x.hostname)||/(^|\.)tenor\.com$/i.test(x.hostname))return u}catch{}}return null}
 function gifDisplayUrl(url){try{const u=new URL(url);if(/(^|\.)tenor\.com$/i.test(u.hostname)||/(^|\.)media\.tenor\.com$/i.test(u.hostname))return `/api/gifs/tenor-proxy?url=${encodeURIComponent(url)}`;}catch{}return url}
 
+// ---- Favorite GIFs (per-user, like Discord's GIF favorites bar) -------------
+// favoriteGifUrls is the fast membership check used while rendering (search
+// results, message bubbles); favoriteGifsList is the full ordered list shown
+// in the panel's Favorites tab. Both are populated from the server on login
+// and kept in sync locally as the user favorites/unfavorites GIFs, so the UI
+// never needs a round-trip just to repaint a star.
+let favoriteGifUrls = new Set();
+let favoriteGifsList = [];
+
+async function loadFavoriteGifs() {
+  try {
+    const d = await apiGet("/api/gifs/favorites");
+    favoriteGifsList = d.results || [];
+    favoriteGifUrls = new Set(favoriteGifsList.map((g) => g.gifUrl));
+  } catch {
+    // Non-critical — stars just won't reflect saved state until next load.
+  }
+}
+
+function gifFavButton(url) {
+  const isFav = favoriteGifUrls.has(url);
+  return `<button type="button" class="gif-fav-btn${isFav ? " is-fav" : ""}" data-fav-gif-url="${escapeHtml(url)}" aria-label="${isFav ? "Remove from favorites" : "Favorite this GIF"}" title="${isFav ? "Remove from favorites" : "Favorite this GIF"}">★</button>`;
+}
+
+// Optimistically flips every star button pointing at this URL (a GIF can
+// appear more than once on screen — search results + a bubble, say) before
+// the request resolves, then rolls back on failure.
+async function toggleFavoriteGif(url, previewUrl, title) {
+  const wasFav = favoriteGifUrls.has(url);
+  const buttons = document.querySelectorAll(`[data-fav-gif-url="${cssEscape(url)}"]`);
+  buttons.forEach((b) => {
+    b.classList.toggle("is-fav", !wasFav);
+    const label = !wasFav ? "Remove from favorites" : "Favorite this GIF";
+    b.setAttribute("aria-label", label);
+    b.title = label;
+  });
+  try {
+    if (wasFav) {
+      await apiDelete(`/api/gifs/favorites?url=${encodeURIComponent(url)}`);
+      favoriteGifUrls.delete(url);
+      favoriteGifsList = favoriteGifsList.filter((g) => g.gifUrl !== url);
+    } else {
+      await apiPost("/api/gifs/favorites", { gifUrl: url, previewUrl: previewUrl || url, title: title || "GIF" });
+      favoriteGifUrls.add(url);
+      favoriteGifsList.unshift({ gifUrl: url, previewUrl: previewUrl || url, title: title || "GIF" });
+    }
+    if (!els.gifPanel.classList.contains("is-hidden") && els.gifTabFavorites.classList.contains("is-active")) {
+      renderGifFavoritesTab();
+    }
+  } catch {
+    buttons.forEach((b) => {
+      b.classList.toggle("is-fav", wasFav);
+      b.setAttribute("aria-label", wasFav ? "Remove from favorites" : "Favorite this GIF");
+      b.title = wasFav ? "Remove from favorites" : "Favorite this GIF";
+    });
+  }
+}
+
+// Minimal CSS.escape fallback — data-attribute selectors choke on quotes and
+// a couple of other characters that show up in real GIF URLs.
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(s);
+  return String(s).replace(/["\\]/g, "\\$&");
+}
+
 function renderMentionToken(uname) {
   const known = knownUsernames.get(uname.toLowerCase());
   const isMe = Boolean(me) && sameUsername(uname, me.username);
@@ -913,6 +980,7 @@ async function openThread(username) {
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
   cancelReply();
+  clearStagedImage();
   closeEmojiPanel();
   els.globalBtn.classList.remove("active");
   renderConversationList();
@@ -955,6 +1023,7 @@ async function openGlobal() {
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
   cancelReply();
+  clearStagedImage();
   closeEmojiPanel();
   els.globalBtn.classList.add("active");
   globalHasUnreadPing = false;
@@ -989,6 +1058,7 @@ async function openGroupThread(groupId) {
   els.main.classList.remove("hide-on-mobile");
   els.composerError.textContent = "";
   cancelReply();
+  clearStagedImage();
   closeEmojiPanel();
   els.globalBtn.classList.remove("active");
   updateGroupThreadTitle(groupId);
@@ -1196,11 +1266,11 @@ function renderBubble(m, kind) {
   let bubbleInner;
   const detectedYouTube = m.type === "text" ? extractYouTubeUrl(m.body) : null;
   const detectedGif = m.type === "text" ? extractGifUrl(m.body) : null;
-  if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.type === "gif" ? gifDisplayUrl(m.body) : m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" />${m.type === "gif" ? `<a class="embed-source-link" href="${escapeHtml(m.body)}" target="_blank" rel="noopener noreferrer">Open GIF</a>` : ""}</div>`;
+  if (m.type === "image" || m.type === "gif") bubbleInner = `<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(m.type === "gif" ? gifDisplayUrl(m.body) : m.body)}" alt="${m.type === "gif" ? "GIF" : "Image message"}" loading="lazy" />${m.type === "gif" ? gifFavButton(m.body) : ""}</div>`;
   else if (m.type === "audio") bubbleInner = `<div class="bubble bubble-audio ${side}">${replyQuote}${renderAudioPlayer(m.body)}</div>`;
   else if (m.type === "video") bubbleInner = `<div class="bubble bubble-video ${side}">${replyQuote}<video controls playsinline preload="metadata" src="${escapeHtml(m.body)}"></video></div>`;
   else if (m.type === "youtube" || detectedYouTube) { const sourceUrl=m.type === "youtube"?m.body:detectedYouTube; const vid=youtubeIdFromClient(sourceUrl); bubbleInner=`<div class="bubble bubble-embed ${side}">${replyQuote}${vid?`<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}" title="YouTube video" loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe><a class="embed-source-link" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sourceUrl)}</a>`:renderLinkedText(m.body)}</div>`; }
-  else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(gifDisplayUrl(detectedGif))}" alt="GIF" loading="lazy" /><a class="embed-source-link" href="${escapeHtml(detectedGif)}" target="_blank" rel="noopener noreferrer">Open GIF</a></div>`;
+  else if (detectedGif) bubbleInner=`<div class="bubble bubble-image ${side}">${replyQuote}<img src="${escapeHtml(gifDisplayUrl(detectedGif))}" alt="GIF" loading="lazy" />${gifFavButton(detectedGif)}</div>`;
   else bubbleInner=`<div class="bubble ${side}">${replyQuote}${renderLinkedText(m.body)}</div>`;
 
   const isPingedHere = !m.mine && m.type === "text" && isMentionOf(m.body, me?.username);
@@ -1540,6 +1610,12 @@ els.thread.addEventListener("click", (e) => {
     return;
   }
 
+  const gifFavBtn = e.target.closest(".gif-fav-btn");
+  if (gifFavBtn) {
+    toggleFavoriteGif(gifFavBtn.dataset.favGifUrl, gifFavBtn.dataset.favGifUrl, "GIF");
+    return;
+  }
+
   const img = e.target.closest(".bubble-image img");
   if (img) {
     openLightbox(img.src);
@@ -1723,11 +1799,11 @@ els.newForm.addEventListener("submit", async (e) => {
 });
 
 // ---- Sending a text message in the open thread ------------------------------
-els.composer.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const body = els.composerInput.value.trim();
+// Pulled out of the submit handler so a staged image (see below) can send
+// its caption through the exact same path a normal typed message takes —
+// reply attachment, YouTube/GIF-link auto-detection, and all.
+async function sendTextMessage(body) {
   if (!body || !activeConversation) return;
-  els.composerInput.value = "";
   closeEmojiPanel();
   sendTypingPing(false);
   const reply = replyingTo;
@@ -1770,6 +1846,18 @@ els.composer.addEventListener("submit", async (e) => {
     replaceMessageBody(to, sentBody, res.message.body, res.message.id);
     const list=threadCache.get(to)||[], local=[...list].reverse().find(m=>String(m.id)===String(res.message.id)); if(local) local.type=res.message.type;
   } catch (err) { appendMessage(to, `Failed to send: ${err.message}`, false, "text"); }
+}
+
+els.composer.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (pendingImageFile) {
+    await flushStagedImage();
+    return;
+  }
+  const body = els.composerInput.value.trim();
+  if (!body || !activeConversation) return;
+  els.composerInput.value = "";
+  await sendTextMessage(body);
 });
 
 // ---- Typing indicator ---------------------------------------------------------
@@ -1883,7 +1971,100 @@ async function sendSelectedGif(url){
   const r=await apiPost("/api/messages",{to,body:url,type:"gif"});
   replaceMessageBody(to,url,r.message.body,r.message.id);
 }
-els.gifBtn?.addEventListener("click",()=>{els.gifPanel.classList.toggle("is-hidden");if(!els.gifPanel.classList.contains("is-hidden"))els.gifSearch.focus()});let gifTimer=null;els.gifSearch?.addEventListener("input",()=>{clearTimeout(gifTimer);gifTimer=setTimeout(async()=>{const q=els.gifSearch.value.trim();if(!q){els.gifResults.innerHTML="";return}try{const d=await apiGet(`/api/gifs/search?q=${encodeURIComponent(q)}`);els.gifResults.innerHTML=(d.results||[]).map(x=>`<button type="button" class="gif-result" data-gif-url="${escapeHtml(x.gifUrl)}"><img src="${escapeHtml(gifDisplayUrl(x.previewUrl||x.gifUrl))}" alt="GIF" /></button>`).join("")||"No GIFs found."}catch(e){els.gifResults.textContent=e.message}},350)});els.gifResults?.addEventListener("click",async e=>{const b=e.target.closest("[data-gif-url]");if(!b||!activeConversation)return;try{const url=b.dataset.gifUrl;await sendSelectedGif(url);closeGifPanel();}catch(err){els.composerError.textContent=err.message}});
+
+// Shared renderer for both the Search and Favorites grids — each tile is a
+// GIF thumbnail plus a star toggle, using the same data-* attributes so one
+// click handler on the panel covers both.
+function renderGifTiles(list) {
+  if (!list.length) return "";
+  return list.map(x => {
+    const gifUrl = x.gifUrl, previewUrl = x.previewUrl || x.gifUrl, title = x.title || "GIF";
+    const isFav = favoriteGifUrls.has(gifUrl);
+    return `<div class="gif-result" data-gif-url="${escapeHtml(gifUrl)}" data-preview-url="${escapeHtml(previewUrl)}" data-gif-title="${escapeHtml(title)}">
+      <img src="${escapeHtml(gifDisplayUrl(previewUrl))}" alt="${escapeHtml(title)}" loading="lazy" />
+      <button type="button" class="gif-fav-btn${isFav ? " is-fav" : ""}" data-fav-gif-url="${escapeHtml(gifUrl)}" aria-label="${isFav ? "Remove from favorites" : "Favorite this GIF"}" title="${isFav ? "Remove from favorites" : "Favorite this GIF"}">★</button>
+    </div>`;
+  }).join("");
+}
+
+function renderGifFavoritesTab() {
+  els.gifFavoritesResults.innerHTML = renderGifTiles(favoriteGifsList);
+  els.gifFavoritesEmpty.classList.toggle("is-hidden", favoriteGifsList.length > 0);
+}
+
+function setGifTab(tab) {
+  const isSearch = tab === "search";
+  els.gifTabSearch.classList.toggle("is-active", isSearch);
+  els.gifTabFavorites.classList.toggle("is-active", !isSearch);
+  els.gifSearch.classList.toggle("is-hidden", !isSearch);
+  els.gifResults.classList.toggle("is-hidden", !isSearch);
+  els.gifFavoritesResults.classList.toggle("is-hidden", isSearch);
+  els.gifFavoritesEmpty.classList.toggle("is-hidden", isSearch || favoriteGifsList.length > 0);
+  if (!isSearch) renderGifFavoritesTab();
+  else els.gifSearch.focus();
+}
+
+els.gifTabSearch?.addEventListener("click", () => setGifTab("search"));
+els.gifTabFavorites?.addEventListener("click", () => setGifTab("favorites"));
+
+els.gifBtn?.addEventListener("click", () => {
+  els.gifPanel.classList.toggle("is-hidden");
+  if (!els.gifPanel.classList.contains("is-hidden")) setGifTab("search");
+});
+
+// A request token guards against a slow early search overwriting the
+// results of a faster, more recent one — without it, typing quickly could
+// leave stale results on screen with no way to tell they're stale.
+let gifTimer = null;
+let gifRequestToken = 0;
+els.gifSearch?.addEventListener("input", () => {
+  clearTimeout(gifTimer);
+  const q = els.gifSearch.value.trim();
+  if (!q) {
+    els.gifResults.innerHTML = "";
+    els.gifResults.classList.remove("is-loading", "is-empty");
+    return;
+  }
+  els.gifResults.classList.add("is-loading");
+  els.gifResults.classList.remove("is-empty");
+  gifTimer = setTimeout(async () => {
+    const token = ++gifRequestToken;
+    try {
+      const d = await apiGet(`/api/gifs/search?q=${encodeURIComponent(q)}`);
+      if (token !== gifRequestToken) return; // a newer search superseded this one
+      const results = d.results || [];
+      els.gifResults.classList.remove("is-loading");
+      els.gifResults.classList.toggle("is-empty", results.length === 0);
+      els.gifResults.innerHTML = renderGifTiles(results);
+    } catch (e) {
+      if (token !== gifRequestToken) return;
+      els.gifResults.classList.remove("is-loading");
+      els.gifResults.classList.add("is-empty");
+      els.gifResults.innerHTML = `<p class="gif-empty-hint">${escapeHtml(e.message || "GIF search failed.")}</p>`;
+    }
+  }, 350);
+});
+
+function bindGifTileClicks(container) {
+  container?.addEventListener("click", async (e) => {
+    const favBtn = e.target.closest(".gif-fav-btn");
+    if (favBtn) {
+      const tile = favBtn.closest("[data-gif-url]");
+      toggleFavoriteGif(favBtn.dataset.favGifUrl, tile?.dataset.previewUrl, tile?.dataset.gifTitle);
+      return;
+    }
+    const tile = e.target.closest("[data-gif-url]");
+    if (!tile || !activeConversation) return;
+    try {
+      await sendSelectedGif(tile.dataset.gifUrl);
+      closeGifPanel();
+    } catch (err) {
+      els.composerError.textContent = err.message;
+    }
+  });
+}
+bindGifTileClicks(els.gifResults);
+bindGifTileClicks(els.gifFavoritesResults);
 
 // ---- Emoji picker -----------------------------------------------------------
 function renderEmojiGrid(query) {
@@ -1944,6 +2125,12 @@ document.addEventListener("click", (e) => {
   closeEmojiPanel();
 });
 
+document.addEventListener("click", (e) => {
+  if (els.gifPanel.classList.contains("is-hidden")) return;
+  if (els.gifPanel.contains(e.target) || els.gifBtn.contains(e.target)) return;
+  closeGifPanel();
+});
+
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!els.emojiPanel.classList.contains("is-hidden")) closeEmojiPanel();
@@ -1952,7 +2139,9 @@ document.addEventListener("keydown", (e) => {
   if (!els.voiceOverlay.classList.contains("is-hidden")) closeVoice();
   if (!els.lightbox.classList.contains("is-hidden")) closeLightbox();
   if (!els.settingsOverlay.classList.contains("is-hidden")) closeSettings();
+  if (!els.gifPanel.classList.contains("is-hidden")) closeGifPanel();
   if (replyingTo) cancelReply();
+  if (pendingImageFile) clearStagedImage();
 });
 
 // ---- Sending an image (button picker, drag-and-drop, or paste) --------------
@@ -2132,6 +2321,62 @@ async function sendRecordedMedia(blob, kind) {
   }
 }
 
+// ---- Staging an image before it sends ----------------------------------------
+// Attaching, dropping, or pasting an image no longer fires it off right away —
+// it's held here as a preview above the composer so there's a chance to type
+// something to go with it. It actually sends (image first, then the typed
+// text as a normal follow-up message) once the person hits Send/Enter, same
+// as any other message.
+let pendingImageFile = null;
+let pendingImagePreviewUrl = null;
+
+function stageImage(file) {
+  els.composerError.textContent = "";
+  if (!activeConversation) {
+    els.composerError.textContent = "Open a conversation first.";
+    return;
+  }
+  if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+    els.composerError.textContent = "Only PNG, JPEG, GIF, and WEBP images are supported.";
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    els.composerError.textContent = "Images are limited to 5MB.";
+    return;
+  }
+  if (pendingImagePreviewUrl) URL.revokeObjectURL(pendingImagePreviewUrl);
+  pendingImageFile = file;
+  pendingImagePreviewUrl = URL.createObjectURL(file);
+  els.stagedAttachmentImg.src = pendingImagePreviewUrl;
+  els.stagedAttachmentBar.classList.remove("is-hidden");
+  els.composerInput.placeholder = "Add a caption (optional)…";
+  els.composerInput.focus();
+}
+
+function clearStagedImage() {
+  pendingImageFile = null;
+  if (pendingImagePreviewUrl) URL.revokeObjectURL(pendingImagePreviewUrl);
+  pendingImagePreviewUrl = null;
+  els.stagedAttachmentImg.src = "";
+  els.stagedAttachmentBar.classList.add("is-hidden");
+  els.composerInput.placeholder = "Write a message…";
+}
+
+els.stagedAttachmentRemove.addEventListener("click", () => clearStagedImage());
+
+// Sends the staged image, then — if the person typed anything alongside it —
+// sends that as a normal follow-up text message right after, so it reads as
+// a caption even though the two are separate messages under the hood.
+async function flushStagedImage() {
+  const file = pendingImageFile;
+  const caption = els.composerInput.value.trim();
+  if (!file) return;
+  clearStagedImage();
+  els.composerInput.value = "";
+  await sendImage(file);
+  if (caption) await sendTextMessage(caption);
+}
+
 els.imageBtn.addEventListener("click", () => {
   if (!activeConversation) {
     els.composerError.textContent = "Open a conversation first.";
@@ -2143,11 +2388,11 @@ els.imageBtn.addEventListener("click", () => {
 els.imageInput.addEventListener("change", () => {
   const file = els.imageInput.files[0];
   els.imageInput.value = ""; // allow picking the same file again later
-  if (file) sendImage(file);
+  if (file) stageImage(file);
 });
 
 // Pasting an image (e.g. "Copy image" from a browser, or a screenshot) into
-// the composer sends it the same way a picked or dropped file would.
+// the composer stages it the same way a picked or dropped file would.
 els.composerInput.addEventListener("paste", (e) => {
   const items = e.clipboardData && e.clipboardData.items;
   if (!items) return;
@@ -2156,7 +2401,7 @@ els.composerInput.addEventListener("paste", (e) => {
       const file = item.getAsFile();
       if (file) {
         e.preventDefault();
-        sendImage(file);
+        stageImage(file);
       }
       break;
     }
@@ -2187,7 +2432,7 @@ els.threadWrap.addEventListener("drop", (e) => {
   dragCounter = 0;
   els.dropHint.classList.add("is-hidden");
   const file = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (file) sendImage(file);
+  if (file) stageImage(file);
 });
 
 // ---- "+" menu: voice message / camera photo / camera video ------------------
@@ -3655,6 +3900,8 @@ els.groupcallDeclineBtn?.addEventListener("click", hideGroupcallIncoming);
   const relations = await apiGet("/api/relations");
   (relations.muted || []).forEach((u) => mutedUsers.add(u));
   (relations.blocked || []).forEach((u) => blockedUsers.add(u));
+
+  loadFavoriteGifs(); // fire-and-forget — stars just fill in once it resolves
 
   await loadConversations();
   await loadGroups();

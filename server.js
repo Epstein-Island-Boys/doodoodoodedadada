@@ -232,6 +232,24 @@ async function initDb() {
     )
   `);
 
+  // Favorited GIFs — one row per (user, gif) pair, so a GIF spotted in the
+  // search panel or sent by someone else in a chat can both be starred into
+  // the same per-user list. UNIQUE(user_id, gif_url) makes favoriting the
+  // same GIF twice a harmless no-op via INSERT OR IGNORE below rather than
+  // a duplicate row.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS favorite_gifs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      gif_url TEXT NOT NULL,
+      preview_url TEXT,
+      title TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, gif_url)
+    )
+  `);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_favorite_gifs_user ON favorite_gifs (user_id, created_at)");
+
   // ---- Profile settings: case-insensitive lookups, avatars, name color,
   // and per-theme custom background colors.
   const userCols = await db.execute("PRAGMA table_info(users)");
@@ -844,6 +862,38 @@ app.get("/api/gifs/tenor-proxy",requireAuth,async(req,res)=>{
     res.set("Content-Type",ct);res.set("Cache-Control","public, max-age=86400");res.set("X-Content-Type-Options","nosniff");
     res.send(Buffer.from(await rr.arrayBuffer()));
   }catch(e){res.status(502).json({error:e.message||"Tenor proxy failed."});}
+});
+
+// Favorited GIFs — a per-user list, like Discord's GIF favorites. A GIF can
+// be starred either from the search results or from a GIF someone else sent
+// in a chat, so the client passes whatever (gifUrl, previewUrl, title) it
+// already has on hand rather than this route re-resolving anything.
+app.get("/api/gifs/favorites",requireAuth,async(req,res)=>{
+  const result=await db.execute({
+    sql:"SELECT id, gif_url, preview_url, title FROM favorite_gifs WHERE user_id = ? ORDER BY created_at DESC",
+    args:[req.session.userId],
+  });
+  res.json({results:result.rows.map(r=>({id:r.id,gifUrl:r.gif_url,previewUrl:r.preview_url||r.gif_url,title:r.title||"GIF"}))});
+});
+
+app.post("/api/gifs/favorites",requireAuth,async(req,res)=>{
+  const gifUrl=String((req.body&&req.body.gifUrl)||"").trim().slice(0,2000);
+  if(!gifUrl)return res.status(400).json({error:"A GIF URL is required."});
+  try{const u=new URL(gifUrl);if(!/^https?:$/.test(u.protocol))throw Error()}catch{return res.status(400).json({error:"Invalid GIF URL."})}
+  const previewUrl=String((req.body&&req.body.previewUrl)||"").trim().slice(0,2000)||gifUrl;
+  const title=String((req.body&&req.body.title)||"GIF").trim().slice(0,200)||"GIF";
+  await db.execute({
+    sql:"INSERT OR IGNORE INTO favorite_gifs (user_id, gif_url, preview_url, title) VALUES (?, ?, ?, ?)",
+    args:[req.session.userId,gifUrl,previewUrl,title],
+  });
+  res.json({ok:true});
+});
+
+app.delete("/api/gifs/favorites",requireAuth,async(req,res)=>{
+  const gifUrl=String((req.query&&req.query.url)||"").trim();
+  if(!gifUrl)return res.status(400).json({error:"A GIF URL is required."});
+  await db.execute({sql:"DELETE FROM favorite_gifs WHERE user_id = ? AND gif_url = ?",args:[req.session.userId,gifUrl]});
+  res.json({ok:true});
 });
 
 async function storeRemoteGif(url,userId){

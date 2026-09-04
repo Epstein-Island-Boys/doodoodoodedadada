@@ -95,6 +95,14 @@
           </div>
           <button type="button" id="reply-bar-cancel" aria-label="Cancel reply">✕</button>
         </div>
+        <div class="staged-attachment-bar is-hidden" id="staged-attachment-bar">
+          <div class="staged-attachment-thumb"><img id="staged-attachment-img" alt="Attached image" /></div>
+          <div class="staged-attachment-info">
+            <span class="staged-attachment-label">Image attached</span>
+            <span class="staged-attachment-hint">Add a caption (optional) and hit send</span>
+          </div>
+          <button type="button" id="staged-attachment-remove" aria-label="Remove attachment">✕</button>
+        </div>
         <p class="typing-indicator is-hidden" id="typing-indicator"></p>
         <form class="composer" id="composer">
           <div class="composer-tools">
@@ -109,9 +117,20 @@
             <button type="button" id="plus-video">🎥 Record a video</button>
           </div>
           <input id="composer-input" placeholder="Write a message…" autocomplete="off" maxlength="2000" />
-          <button type="submit">Send</button>
+          <button type="submit" id="composer-send-btn">Send</button>
 
-          <div class="gif-panel is-hidden" id="gif-panel"><input id="gif-search" placeholder="Search GIFs…" autocomplete="off" /><div class="gif-results" id="gif-results"></div><div class="gif-attribution">Powered by KLIPY</div></div><div class="emoji-panel is-hidden" id="emoji-panel">
+          <div class="gif-panel is-hidden" id="gif-panel">
+            <div class="gif-panel-tabs">
+              <button type="button" class="gif-tab is-active" id="gif-tab-search" data-gif-tab="search">Search</button>
+              <button type="button" class="gif-tab" id="gif-tab-favorites" data-gif-tab="favorites">★ Favorites</button>
+            </div>
+            <input id="gif-search" placeholder="Search GIFs…" autocomplete="off" />
+            <div class="gif-results" id="gif-results"></div>
+            <div class="gif-results is-hidden" id="gif-favorites-results"></div>
+            <p class="gif-empty-hint is-hidden" id="gif-favorites-empty">No favorites yet — tap the ★ on any GIF to save it here.</p>
+            <div class="gif-attribution">Powered by KLIPY</div>
+          </div>
+          <div class="emoji-panel is-hidden" id="emoji-panel">
             <input type="text" class="emoji-search" id="emoji-search" placeholder="Search emoji…" autocomplete="off" />
             <div class="emoji-grid" id="emoji-grid"></div>
           </div>
